@@ -45,14 +45,13 @@
 //! - Both proofs use constant-time comparison via the `srp` crate.
 //! - SRP alone provides no forward secrecy — combine with TLS for transport.
 
-use srp::client::{SrpClient, srp_private_value};
-use srp::groups::G_2048;
-use srp::types::SrpGroup;
-use sha2::Sha256;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use srp::client::{SrpClient, SrpClientVerifier};
+use srp::groups::G_2048;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::errors::CryptoError;
 
@@ -63,7 +62,7 @@ use crate::errors::CryptoError;
 /// The server uses this to verify login without seeing the password.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SrpVerifier {
-    /// Hex-encoded verifier (v = g^x mod N).
+    /// Verifier bytes (v = g^x mod N).
     pub verifier: Vec<u8>,
     /// The SRP-specific salt used to derive x (NOT the argon2_salt).
     pub srp_salt: [u8; 32],
@@ -73,7 +72,7 @@ pub struct SrpVerifier {
 /// Holds `a` (private ephemeral scalar) — must be zeroized after use.
 #[derive(ZeroizeOnDrop)]
 pub struct SrpClientEphemeral {
-    /// a: private ephemeral scalar (large random number)
+    /// a: private ephemeral scalar as bytes (large random number)
     private_a: Vec<u8>,
     /// A: g^a mod N — sent to server in SRP init
     pub public_a: Vec<u8>,
@@ -86,13 +85,25 @@ pub struct SrpClientEphemeral {
 pub struct SrpClientProof {
     /// M1: client proof — send to server
     pub client_proof: Vec<u8>,
-    /// K: session key — keep locally to verify M2
-    session_key: Vec<u8>,
+    /// Verifier holding session key and proof verification logic.
+    #[zeroize(skip)]
+    verifier: SrpClientVerifier<Sha256>,
+}
+
+// Manual Debug implementation that skips the opaque verifier field
+impl std::fmt::Debug for SrpClientProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SrpClientProof")
+            .field("client_proof", &format!("<{} bytes>", self.client_proof.len()))
+            .field("session_key", &format!("<{} bytes>", self.verifier.key().len()))
+            .finish()
+    }
 }
 
 impl SrpClientProof {
+    /// Returns the derived session key K for encrypting subsequent traffic.
     pub fn session_key(&self) -> &[u8] {
-        &self.session_key
+        self.verifier.key()
     }
 }
 
@@ -104,6 +115,7 @@ impl SrpClientProof {
 /// Do not pass the raw user password here.
 ///
 /// # Arguments
+/// * `email`              — User's email address (identity for SRP)
 /// * `srp_password_bytes` — Output of `derive_srp_password(password, srp_salt)`.
 ///   This is a 32-byte Argon2id-derived value, NOT the password itself.
 /// * `srp_salt`           — A fresh 32-byte random salt (from `generate_salt()`).
@@ -116,19 +128,24 @@ impl SrpClientProof {
 /// - `srp_password_bytes` is consumed and zeroized after use.
 /// - The raw password is never an argument to this function.
 pub fn compute_verifier(
+    email: &str,
     srp_password_bytes: Zeroizing<Vec<u8>>,
     srp_salt: [u8; 32],
 ) -> Result<SrpVerifier, CryptoError> {
     let client = SrpClient::<Sha256>::new(&G_2048);
 
-    // SRP: compute x = H(salt || password_bytes)
-    // Then v = g^x mod N
-    let verifier = client.compute_verifier(&srp_salt, &srp_password_bytes);
+    // SRP: compute x = H(salt || password_bytes), then v = g^x mod N
+    // API: compute_verifier(username, password, salt)
+    let verifier = client.compute_verifier(
+        email.as_bytes(),           // username/identity
+        &srp_password_bytes,        // derived password bytes
+        &srp_salt,                  // salt
+    );
 
-    Ok(SrpVerifier {
-        verifier,
-        srp_salt,
-    })
+    // Explicitly drop to trigger zeroize on sensitive data
+    drop(srp_password_bytes);
+
+    Ok(SrpVerifier { verifier, srp_salt })
 }
 
 // ─── Login: Step 1 ─────────────────────────────────────────────────────────────
@@ -141,28 +158,30 @@ pub fn compute_verifier(
 ///
 /// # Critical Validation
 /// The generated `A` value MUST NOT be 0 mod N.
-/// This is an SRP-6a requirement. The `srp` crate generates `a` randomly
-/// from OsRng, making `A = 0` computationally infeasible, but we validate
-/// explicitly as a defense-in-depth measure.
+/// This is an SRP-6a requirement. We validate explicitly as a defense-in-depth measure.
 pub fn generate_client_ephemeral() -> Result<SrpClientEphemeral, CryptoError> {
     let client = SrpClient::<Sha256>::new(&G_2048);
 
-    // Generate private ephemeral `a` using OsRng
-    let private_a = srp_private_value(&G_2048, &mut OsRng);
+    // Generate private ephemeral 'a' as random bytes
+    // 64 bytes = 512 bits, sufficient for 2048-bit SRP group
+    let mut private_a = vec![0u8; 64];
+    OsRng.fill_bytes(&mut private_a);
 
     // Compute public ephemeral A = g^a mod N
+    // compute_public_ephemeral returns Vec<u8> directly
     let public_a = client.compute_public_ephemeral(&private_a);
 
     // Validate A != 0 mod N (SRP-6a protocol requirement)
-    // A all-zeros would break the security proof
     if public_a.iter().all(|&b| b == 0) {
         return Err(CryptoError::Srp(
-            "Generated A = 0 mod N — this should be computationally impossible. \
-             If you see this error, there is a bug in the RNG or srp crate.".into()
+            "Generated A = 0 mod N — this should be computationally impossible.".into(),
         ));
     }
 
-    Ok(SrpClientEphemeral { private_a, public_a })
+    Ok(SrpClientEphemeral {
+        private_a,
+        public_a,
+    })
 }
 
 // ─── Login: Step 2 ─────────────────────────────────────────────────────────────
@@ -175,7 +194,7 @@ pub fn generate_client_ephemeral() -> Result<SrpClientEphemeral, CryptoError> {
 /// * `email`              — User's email address (identity, not hashed before passing here)
 /// * `srp_password_bytes` — Output of `derive_srp_password(password, srp_salt)` — NOT raw password
 /// * `srp_salt`           — SRP salt received from the server in Step 1 response
-/// * `server_public_b`    — B value received from the server in Step 1 response
+/// * `server_public_b`    — B value received from the server in Step 1 response (as bytes)
 /// * `ephemeral`          — The `SrpClientEphemeral` from `generate_client_ephemeral()`
 ///
 /// # Returns
@@ -190,26 +209,28 @@ pub fn compute_client_proof(
 ) -> Result<SrpClientProof, CryptoError> {
     let client = SrpClient::<Sha256>::new(&G_2048);
 
-    // Validate B != 0 (server-side validation, but defend against malicious server)
+    // Validate B != 0 (defend against malicious server sending invalid B)
     if server_public_b.iter().all(|&b| b == 0) {
         return Err(CryptoError::Srp(
-            "Server sent B = 0 — possible attack or server bug".into()
+            "Server sent B = 0 — possible attack or server bug".into(),
         ));
     }
 
-    // Compute the SRP verifier from our password bytes (to derive x)
-    // then compute the client proof
-    let verifier = client.process_reply(
-        &ephemeral.private_a,
-        email.as_bytes(),
-        &srp_password_bytes,
-        srp_salt,
-        server_public_b,
-    ).map_err(|e| CryptoError::Srp(format!("SRP process_reply failed: {e:?}")))?;
+    // Process server reply to compute shared secret, client proof (M1), and session key (K)
+    // API: process_reply(private_a: &[u8], username, password, salt, server_public: &[u8])
+    let verifier = client
+        .process_reply(
+            &ephemeral.private_a,     // private ephemeral 'a' as bytes
+            email.as_bytes(),          // username/identity
+            &*srp_password_bytes,      // derived password bytes (dereference Zeroizing)
+            srp_salt,                  // salt
+            server_public_b,           // server's public ephemeral B (as bytes)
+        )
+        .map_err(|e| CryptoError::Srp(format!("SRP process_reply failed: {e:?}")))?;
 
     Ok(SrpClientProof {
         client_proof: verifier.proof().to_vec(),
-        session_key: verifier.key().to_vec(),
+        verifier, // Store for M2 verification
     })
 }
 
@@ -236,15 +257,14 @@ pub fn verify_server_proof(
     server_proof: &[u8],
     srp_proof: &SrpClientProof,
 ) -> Result<(), CryptoError> {
-    let client = SrpClient::<Sha256>::new(&G_2048);
-
-    // The srp crate computes expected M2 = H(A || M1 || K) and compares
-    // using constant-time equality
-    client.verify_server(
-        &srp_proof.client_proof,
-        &srp_proof.session_key,
-        server_proof,
-    ).map_err(|_| CryptoError::Srp(
-        "Server proof verification failed — possible MITM or server error".into()
-    ))
+    // Use the stored verifier to check server's proof M2
+    // API: verify_server(server_proof: &[u8]) -> Result<(), SrpError>
+    srp_proof
+        .verifier
+        .verify_server(server_proof)
+        .map_err(|_| {
+            CryptoError::Srp(
+                "Server proof verification failed — possible MITM or server error".into(),
+            )
+        })
 }

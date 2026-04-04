@@ -32,17 +32,17 @@
 //! ```
 
 use chacha20poly1305::{
-    XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
+    XChaCha20Poly1305, XNonce,
 };
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use rand_core::RngCore;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop};
-use serde::{Deserialize, Serialize};
+use zeroize::ZeroizeOnDrop;
 
 use crate::errors::CryptoError;
 use crate::kdf::MasterKey;
@@ -145,12 +145,16 @@ pub fn generate_keypair() -> UserKeypair {
     let ed25519_public = Ed25519PublicKey(ed25519_signing_key.verifying_key().to_bytes());
     let ed25519_private_seed = ed25519_signing_key.to_bytes();
 
-    // X25519: generate static keypair (for vault sharing)
-    let x25519_private_bytes: [u8; 32] = {
-        let mut buf = [0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        buf
-    };
+    // // X25519: generate static keypair (for vault sharing)
+    // let x25519_private_bytes: [u8; 32] = {
+    //     let mut buf = [0u8; 32];
+    //     OsRng.fill_bytes(&mut buf);
+    //     buf
+    // };
+    // X25519: DERIVE from Ed25519 seed (not random!) for deterministic reconstruction
+    let x25519_private_bytes = derive_x25519_from_ed25519_seed(&ed25519_private_seed)
+        .expect("HKDF derivation should never fail with valid inputs");
+
     let x25519_static = StaticSecret::from(x25519_private_bytes);
     let x25519_public = X25519PublicKeyBytes(X25519PublicKey::from(&x25519_static).to_bytes());
 
@@ -179,13 +183,17 @@ pub fn encrypt_private_key(
     keypair: &UserKeypair,
     master_key: &MasterKey,
 ) -> Result<EncryptedPrivateKey, CryptoError> {
-    let (cipher, nonce_bytes, nonce) = new_xchacha_cipher(&master_key.0, HKDF_INFO_PRIVATE_KEY_ENC)?;
+    let (cipher, nonce_bytes, nonce) =
+        new_xchacha_cipher(&master_key.0, HKDF_INFO_PRIVATE_KEY_ENC)?;
 
     let ciphertext = cipher
         .encrypt(&nonce, keypair.ed25519_private_seed.as_ref())
         .map_err(|_| CryptoError::KeyWrap)?;
 
-    Ok(EncryptedPrivateKey { nonce: nonce_bytes, ciphertext })
+    Ok(EncryptedPrivateKey {
+        nonce: nonce_bytes,
+        ciphertext,
+    })
 }
 
 /// Decrypt the Ed25519 private key seed stored on the server.
@@ -200,16 +208,19 @@ pub fn decrypt_private_key(
     enc: &EncryptedPrivateKey,
     master_key: &MasterKey,
 ) -> Result<UserKeypair, CryptoError> {
-    let (cipher, _, nonce) = new_xchacha_cipher_from_nonce(&master_key.0, &enc.nonce, HKDF_INFO_PRIVATE_KEY_ENC)?;
+    let (cipher, _, nonce) =
+        new_xchacha_cipher_from_nonce(&master_key.0, &enc.nonce, HKDF_INFO_PRIVATE_KEY_ENC)?;
 
     let seed_bytes = cipher
         .decrypt(&nonce, enc.ciphertext.as_ref())
         .map_err(|_| CryptoError::KeyUnwrap)?;
 
     if seed_bytes.len() != ED25519_PRIVATE_LEN {
-        return Err(CryptoError::InvalidInput(
-            format!("expected {} byte seed, got {}", ED25519_PRIVATE_LEN, seed_bytes.len())
-        ));
+        return Err(CryptoError::InvalidInput(format!(
+            "expected {} byte seed, got {}",
+            ED25519_PRIVATE_LEN,
+            seed_bytes.len()
+        )));
     }
 
     let mut seed = [0u8; ED25519_PRIVATE_LEN];
@@ -284,9 +295,14 @@ pub fn wrap_vault_key_for_user(
 
     // Encrypt vault_key with wrap_key
     let (cipher, nonce_bytes, nonce) = new_xchacha_cipher(&wrap_key.0, &[])?;
-    let encrypted_vault_key = cipher
+    let ciphertext = cipher
         .encrypt(&nonce, vault_key.0.as_ref())
         .map_err(|_| CryptoError::KeyWrap)?;
+
+    // Prepend nonce to match WrappedVaultKey format spec
+    let mut encrypted_vault_key = Vec::with_capacity(XCHACHA_NONCE_LEN + ciphertext.len());
+    encrypted_vault_key.extend_from_slice(&nonce_bytes);
+    encrypted_vault_key.extend_from_slice(&ciphertext);
 
     Ok(WrappedVaultKey {
         eph_pub_key: eph_pub.to_bytes(),
@@ -319,7 +335,9 @@ pub fn unwrap_vault_key(
     // OR use a fixed nonce stored in WrappedVaultKey.
     // DESIGN: nonce is embedded in encrypted_vault_key (first 24 bytes).
     if wrapped.encrypted_vault_key.len() < XCHACHA_NONCE_LEN {
-        return Err(CryptoError::InvalidInput("wrapped vault key too short".into()));
+        return Err(CryptoError::InvalidInput(
+            "wrapped vault key too short".into(),
+        ));
     }
 
     let nonce_bytes: [u8; XCHACHA_NONCE_LEN] = wrapped.encrypted_vault_key[..XCHACHA_NONCE_LEN]
@@ -333,7 +351,9 @@ pub fn unwrap_vault_key(
         .map_err(|_| CryptoError::KeyUnwrap)?;
 
     if vault_key_bytes.len() != 32 {
-        return Err(CryptoError::InvalidInput("decrypted vault key wrong length".into()));
+        return Err(CryptoError::InvalidInput(
+            "decrypted vault key wrong length".into(),
+        ));
     }
 
     let mut key = [0u8; 32];
@@ -377,8 +397,8 @@ fn new_xchacha_cipher(
         derived
     };
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&key_bytes.0)
-        .map_err(|_| CryptoError::KeyWrap)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(&key_bytes.0).map_err(|_| CryptoError::KeyWrap)?;
 
     let mut nonce_bytes = [0u8; XCHACHA_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -402,8 +422,8 @@ fn new_xchacha_cipher_from_nonce(
         derived
     };
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&key_bytes.0)
-        .map_err(|_| CryptoError::KeyUnwrap)?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(&key_bytes.0).map_err(|_| CryptoError::KeyUnwrap)?;
 
     let nonce = XNonce::from_slice(nonce_bytes).clone();
     Ok((cipher, *nonce_bytes, nonce))
@@ -414,12 +434,18 @@ fn new_xchacha_cipher_from_nonce(
 impl UserKeypair {
     /// Access the X25519 private key bytes for ECDH unwrapping.
     /// Only expose to the crypto layer — never serialize or transmit.
-    pub(crate) fn x25519_private_bytes(&self) -> &[u8; X25519_PRIVATE_LEN] {
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub fn x25519_private_bytes(&self) -> &[u8; X25519_PRIVATE_LEN] {
         &self.x25519_private
     }
 
     /// Access the Ed25519 seed for signing operations.
-    pub(crate) fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
+    #[cfg(any(test, feature = "test-utils"))]
+    #[allow(dead_code)]
+    pub fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
         &self.ed25519_private_seed
     }
 }
+
+

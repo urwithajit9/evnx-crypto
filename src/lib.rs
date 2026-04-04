@@ -24,18 +24,18 @@ pub mod zeroize;
 
 // Re-export the most commonly used types at crate root
 pub use errors::CryptoError;
-pub use kdf::{MasterKey, derive_master_key, derive_srp_password, generate_salt};
-pub use vault::{VaultKey, EncryptedBlob, encrypt_vault, decrypt_vault,
-    wrap_vault_key_with_master_key, unwrap_vault_key_with_master_key};
+pub use kdf::{derive_master_key, derive_srp_password, generate_salt, MasterKey};
 pub use keypair::{
-    UserKeypair, EncryptedPrivateKey, WrappedVaultKey,
-    Ed25519PublicKey, X25519PublicKeyBytes,
-    generate_keypair, encrypt_private_key, decrypt_private_key,
-    wrap_vault_key_for_user, unwrap_vault_key,
+    decrypt_private_key, encrypt_private_key, generate_keypair, unwrap_vault_key,
+    wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey, UserKeypair, WrappedVaultKey,
+    X25519PublicKeyBytes,
 };
 pub use srp::{
-    SrpVerifier, SrpClientEphemeral, SrpClientProof,
-    compute_verifier, generate_client_ephemeral,
-    compute_client_proof, verify_server_proof,
+    compute_client_proof, compute_verifier, generate_client_ephemeral, verify_server_proof,
+    SrpClientEphemeral, SrpClientProof, SrpVerifier,
 };
-pub use zeroize::{SecretBytes, SecretString, SecretArray, zeroize_slice};
+pub use vault::{
+    decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key, wrap_vault_key_with_master_key,
+    EncryptedBlob, VaultKey,
+};
+pub use zeroize::{zeroize_slice, SecretArray, SecretBytes, SecretString};

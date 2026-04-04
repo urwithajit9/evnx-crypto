@@ -12,13 +12,22 @@
 //! 5. Vault sharing: wrap vault key for a second user, unwrap and decrypt
 
 use evnx_crypto::{
-    kdf::{generate_salt, derive_master_key, derive_srp_password},
-    vault::{VaultKey, encrypt_vault, decrypt_vault, wrap_vault_key_with_master_key, unwrap_vault_key_with_master_key},
-    keypair::{generate_keypair, encrypt_private_key, decrypt_private_key, wrap_vault_key_for_user, unwrap_vault_key},
-    srp::{compute_verifier, generate_client_ephemeral, compute_client_proof, verify_server_proof},
+    kdf::{derive_master_key, derive_srp_password, generate_salt},
+    keypair::{
+        decrypt_private_key, encrypt_private_key, generate_keypair, unwrap_vault_key,
+        wrap_vault_key_for_user,
+    },
+    srp::{compute_client_proof, compute_verifier, generate_client_ephemeral, verify_server_proof},
+    vault::{
+        decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key,
+        wrap_vault_key_with_master_key, VaultKey,
+    },
 };
-use srp::{server::{SrpServer, UserRecord}, groups::G_2048};
 use sha2::Sha256;
+use srp::{
+    groups::G_2048,
+    server::{SrpServer, UserRecord},
+};
 
 const TEST_EMAIL: &str = "integration-test@example.com";
 const TEST_PASSWORD: &str = "TestP@ssw0rd-Integration!";
@@ -58,7 +67,10 @@ fn test_full_registration_flow() {
 
     println!("✓ Registration flow complete");
     println!("  SRP verifier: {} bytes", verifier.verifier.len());
-    println!("  Encrypted private key: {} bytes", enc_private_key.ciphertext.len());
+    println!(
+        "  Encrypted private key: {} bytes",
+        enc_private_key.ciphertext.len()
+    );
 }
 
 #[test]
@@ -100,28 +112,46 @@ fn test_full_login_and_vault_push_pull_flow() {
     };
     let (server_state, server_b) = server.process_registration(record).unwrap();
     let srp_pw_login = derive_srp_password(TEST_PASSWORD.as_bytes(), &verifier.srp_salt).unwrap();
-    let proof = compute_client_proof(TEST_EMAIL, srp_pw_login, &verifier.srp_salt, &server_b, &eph).unwrap();
+    let proof = compute_client_proof(
+        TEST_EMAIL,
+        srp_pw_login,
+        &verifier.srp_salt,
+        &server_b,
+        &eph,
+    )
+    .unwrap();
     let server_m2 = server_state.verify_client(&proof.client_proof).unwrap();
     verify_server_proof(&server_m2, &proof).unwrap();
     println!("✓ SRP login verified");
 
     // ─── VAULT PUSH ────────────────────────────────────────────────
     // Unwrap vault key using user's X25519 private key
-    let vault_key_push = unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
-    assert_eq!(vault_key_push.0, original_key_bytes, "Unwrapped key must match original");
+    let vault_key_push =
+        unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
+    assert_eq!(
+        vault_key_push.0, original_key_bytes,
+        "Unwrapped key must match original"
+    );
 
     // Encrypt .env file
     let encrypted_blob = encrypt_vault(TEST_ENV, &vault_key_push).unwrap();
-    println!("✓ .env encrypted: {} bytes ciphertext", encrypted_blob.ciphertext.len());
+    println!(
+        "✓ .env encrypted: {} bytes ciphertext",
+        encrypted_blob.ciphertext.len()
+    );
 
     // ─── VAULT PULL ────────────────────────────────────────────────
     // Unwrap vault key again (simulates fetching from server)
-    let vault_key_pull = unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
+    let vault_key_pull =
+        unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
 
     // Decrypt .env file
     let decrypted = decrypt_vault(&encrypted_blob, &vault_key_pull).unwrap();
     assert_eq!(decrypted, TEST_ENV, "Decrypted content must match original");
-    println!("✓ .env decrypted: {} bytes, content matches", decrypted.len());
+    println!(
+        "✓ .env decrypted: {} bytes, content matches",
+        decrypted.len()
+    );
 }
 
 #[test]
@@ -145,12 +175,17 @@ fn test_vault_sharing_flow() {
 
     // Owner shares vault: wraps vault key for collaborator
     // (Owner must first unwrap their copy, then re-wrap for collaborator)
-    let vault_key_owner = unwrap_vault_key(&wrapped_for_owner, owner_keypair.x25519_private_bytes()).unwrap();
+    let vault_key_owner =
+        unwrap_vault_key(&wrapped_for_owner, owner_keypair.x25519_private_bytes()).unwrap();
     let wrapped_for_collab = wrap_vault_key_for_user(&vault_key_owner, &collab_x25519_pub).unwrap();
 
     // Collaborator can now decrypt the vault
-    let vault_key_collab = unwrap_vault_key(&wrapped_for_collab, collab_keypair.x25519_private_bytes()).unwrap();
-    assert_eq!(vault_key_collab.0, original, "Collaborator must get same vault key");
+    let vault_key_collab =
+        unwrap_vault_key(&wrapped_for_collab, collab_keypair.x25519_private_bytes()).unwrap();
+    assert_eq!(
+        vault_key_collab.0, original,
+        "Collaborator must get same vault key"
+    );
 
     // Encrypt with owner's key, decrypt with collab's unwrapped key
     let blob = encrypt_vault(TEST_ENV, &vault_key_owner).unwrap();

@@ -52,6 +52,9 @@ proptest      = "1"
 hex           = "0.4"
 criterion     = { version = "0.5", features = ["html_reports"] }
 
+[features]
+test-utils = []  # Enables test accessor methods
+
 # [[bench]]
 # name = "kdf_bench"
 # harness = false

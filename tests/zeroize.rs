@@ -2,7 +2,7 @@
 
 //! Tests for secure memory types and zeroization guarantees.
 
-use evnx_crypto::zeroize::{SecretBytes, SecretString, SecretArray, zeroize_slice};
+use evnx_crypto::zeroize::{zeroize_slice, SecretArray, SecretBytes, SecretString};
 
 #[test]
 fn test_secret_bytes_as_ref() {
@@ -21,7 +21,10 @@ fn test_secret_bytes_len() {
 fn test_secret_bytes_debug_does_not_leak() {
     let secret = SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF]);
     let debug_str = format!("{:?}", secret);
-    assert!(!debug_str.contains("DE"), "Debug must not expose secret bytes");
+    assert!(
+        !debug_str.contains("DE"),
+        "Debug must not expose secret bytes"
+    );
     assert!(debug_str.contains("REDACTED"), "Debug must say REDACTED");
 }
 
@@ -35,7 +38,10 @@ fn test_secret_string_as_bytes() {
 fn test_secret_string_debug_does_not_leak() {
     let secret = SecretString::from("super-secret");
     let debug_str = format!("{:?}", secret);
-    assert!(!debug_str.contains("super-secret"), "Debug must not expose content");
+    assert!(
+        !debug_str.contains("super-secret"),
+        "Debug must not expose content"
+    );
 }
 
 #[test]
@@ -50,8 +56,10 @@ fn test_zeroize_slice_clears_memory() {
     let mut buf = [0xABu8; 64];
     assert!(buf.iter().all(|&b| b == 0xAB));
     zeroize_slice(&mut buf);
-    assert!(buf.iter().all(|&b| b == 0),
-        "zeroize_slice must overwrite all bytes with zero");
+    assert!(
+        buf.iter().all(|&b| b == 0),
+        "zeroize_slice must overwrite all bytes with zero"
+    );
 }
 
 /// Verify that SecretArray is zeroed on drop using raw pointer inspection.
@@ -76,9 +84,11 @@ fn test_secret_array_zeroed_on_drop() {
     // Note: This test may be unreliable on some platforms due to
     // compiler optimizations. Run with: RUSTFLAGS="-C opt-level=0"
     let after_drop = unsafe { *ptr };
-    assert_eq!(after_drop, 0,
+    assert_eq!(
+        after_drop, 0,
         "SecretArray memory must be zeroed after drop. \
-         If this fails, run with RUSTFLAGS='-C opt-level=0'");
+         If this fails, run with RUSTFLAGS='-C opt-level=0'"
+    );
 }
 
 #[test]

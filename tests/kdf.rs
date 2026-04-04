@@ -1,14 +1,13 @@
 // tests/kdf.rs
 // Integration tests for the KDF module
 
-
 use evnx_crypto::kdf::{
-    derive_master_key, 
-    derive_srp_password, 
-    generate_salt, 
-    // MasterKey, 
-    MASTER_KEY_LEN, 
-    SALT_LEN
+    derive_master_key,
+    derive_srp_password,
+    generate_salt,
+    // MasterKey,
+    MASTER_KEY_LEN,
+    SALT_LEN,
 };
 // use zeroize::Zeroizing;
 
@@ -39,10 +38,8 @@ fn test_derive_master_key_different_salts_produce_different_keys() {
     let mut salt_b = [0x22u8; SALT_LEN];
     salt_b[0] = 0xFF; // Ensure salts differ
 
-    let key_a = derive_master_key(password, &salt_a)
-        .expect("derive_master_key should succeed");
-    let key_b = derive_master_key(password, &salt_b)
-        .expect("derive_master_key should succeed");
+    let key_a = derive_master_key(password, &salt_a).expect("derive_master_key should succeed");
+    let key_b = derive_master_key(password, &salt_b).expect("derive_master_key should succeed");
 
     assert_ne!(
         key_a.0, key_b.0,
@@ -51,19 +48,19 @@ fn test_derive_master_key_different_salts_produce_different_keys() {
 }
 
 /// Test 3: Independent derivation paths — argon2_salt ≠ srp_salt
-/// Critical for: compartmentalization; compromise of SRP verifier 
+/// Critical for: compartmentalization; compromise of SRP verifier
 /// must not enable derivation of the Ed25519-encrypting master key
 #[test]
 fn test_argon2_salt_and_srp_salt_produce_independent_outputs() {
     let password = b"correct horse battery staple";
     let argon2_salt = [0xAAu8; SALT_LEN]; // Salt for master key derivation
-    let srp_salt = [0xBBu8; SALT_LEN];    // Salt for SRP password derivation
+    let srp_salt = [0xBBu8; SALT_LEN]; // Salt for SRP password derivation
 
     // Derive using their intended, separate salts
-    let master_key = derive_master_key(password, &argon2_salt)
-        .expect("derive_master_key should succeed");
-    let srp_password = derive_srp_password(password, &srp_salt)
-        .expect("derive_srp_password should succeed");
+    let master_key =
+        derive_master_key(password, &argon2_salt).expect("derive_master_key should succeed");
+    let srp_password =
+        derive_srp_password(password, &srp_salt).expect("derive_srp_password should succeed");
 
     // Outputs must differ (different salts + different intended purposes)
     assert_ne!(
@@ -98,9 +95,22 @@ fn test_generate_salt_uniqueness_and_length() {
     let salt1 = generate_salt();
     let salt2 = generate_salt();
 
-    assert_eq!(salt1.len(), SALT_LEN, "Generated salt must be {} bytes", SALT_LEN);
-    assert_eq!(salt2.len(), SALT_LEN, "Generated salt must be {} bytes", SALT_LEN);
-    assert_ne!(salt1, salt2, "Generated salts must be unique (cryptographic randomness)");
+    assert_eq!(
+        salt1.len(),
+        SALT_LEN,
+        "Generated salt must be {} bytes",
+        SALT_LEN
+    );
+    assert_eq!(
+        salt2.len(),
+        SALT_LEN,
+        "Generated salt must be {} bytes",
+        SALT_LEN
+    );
+    assert_ne!(
+        salt1, salt2,
+        "Generated salts must be unique (cryptographic randomness)"
+    );
 }
 
 #[test]
@@ -108,9 +118,8 @@ fn test_derive_master_key_output_length() {
     let password = b"test";
     let salt = generate_salt();
 
-    let master_key = derive_master_key(password, &salt)
-        .expect("derive_master_key should succeed");
-    
+    let master_key = derive_master_key(password, &salt).expect("derive_master_key should succeed");
+
     assert_eq!(
         master_key.0.len(),
         MASTER_KEY_LEN,
@@ -124,9 +133,9 @@ fn test_derive_srp_password_output_length() {
     let password = b"test";
     let salt = generate_salt();
 
-    let srp_output = derive_srp_password(password, &salt)
-        .expect("derive_srp_password should succeed");
-    
+    let srp_output =
+        derive_srp_password(password, &salt).expect("derive_srp_password should succeed");
+
     assert_eq!(
         srp_output.len(),
         32,
@@ -197,7 +206,7 @@ fn benchmark_derive_master_key() {
     let elapsed = start.elapsed();
 
     println!("derive_master_key took: {:?}", elapsed);
-    
+
     // Optional: fail test if too slow/fast during CI tuning
     // assert!(
     //     elapsed.as_millis() >= 300 && elapsed.as_millis() <= 500,

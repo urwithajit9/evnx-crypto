@@ -14,8 +14,8 @@
 //! | `SecretString` | Password input before converting to bytes |
 //! | `ZeroizeVec<T>` | Temporary buffers holding multiple secret values |
 
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use std::fmt;
+use zeroize::{Zeroize, Zeroizing};
 
 /// A heap-allocated byte buffer that is zeroized on drop.
 ///

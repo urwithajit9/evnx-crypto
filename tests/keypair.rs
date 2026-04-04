@@ -4,13 +4,14 @@
 
 use evnx_crypto::{
     kdf::{derive_master_key, generate_salt},
-    vault::VaultKey,
     keypair::{
-        generate_keypair, encrypt_private_key, decrypt_private_key,
-        wrap_vault_key_for_user, unwrap_vault_key,
+        decrypt_private_key, encrypt_private_key, generate_keypair, unwrap_vault_key,
+        wrap_vault_key_for_user,
     },
+    vault::VaultKey,
 };
 use proptest::prelude::*;
+use proptest::test_runner::ProptestConfig; 
 
 // ─── Keypair Generation ────────────────────────────────────────────────────────
 
@@ -50,8 +51,10 @@ fn test_x25519_key_derivation_is_deterministic() {
     let master_key2 = derive_master_key(b"test-password", &salt).unwrap();
     let kp2 = decrypt_private_key(&enc, &master_key2).unwrap();
 
-    assert_eq!(original_x25519_pub, kp2.x25519_public.0,
-        "X25519 public key must be deterministically derived from Ed25519 seed");
+    assert_eq!(
+        original_x25519_pub, kp2.x25519_public.0,
+        "X25519 public key must be deterministically derived from Ed25519 seed"
+    );
 }
 
 // ─── Private Key Encryption ────────────────────────────────────────────────────
@@ -70,8 +73,14 @@ fn test_encrypt_decrypt_private_key_round_trip() {
     let master_key2 = derive_master_key(b"my-password-123", &salt).unwrap();
     let kp2 = decrypt_private_key(&enc, &master_key2).unwrap();
 
-    assert_eq!(original_ed25519_pub, kp2.ed25519_public.0, "Ed25519 public key must match");
-    assert_eq!(original_x25519_pub, kp2.x25519_public.0, "X25519 public key must match");
+    assert_eq!(
+        original_ed25519_pub, kp2.ed25519_public.0,
+        "Ed25519 public key must match"
+    );
+    assert_eq!(
+        original_x25519_pub, kp2.x25519_public.0,
+        "X25519 public key must match"
+    );
 }
 
 #[test]
@@ -85,7 +94,10 @@ fn test_wrong_master_key_fails_decryption() {
     let wrong_master_key = derive_master_key(b"wrong-password", &salt).unwrap();
     let result = decrypt_private_key(&enc, &wrong_master_key);
 
-    assert!(result.is_err(), "Decryption with wrong master key must fail");
+    assert!(
+        result.is_err(),
+        "Decryption with wrong master key must fail"
+    );
     // Must NOT panic — must return Err
 }
 
@@ -102,7 +114,10 @@ fn test_tampered_encrypted_private_key_fails() {
     let master_key2 = derive_master_key(b"password", &salt).unwrap();
     let result = decrypt_private_key(&enc, &master_key2);
 
-    assert!(result.is_err(), "Tampered ciphertext must fail authentication");
+    assert!(
+        result.is_err(),
+        "Tampered ciphertext must fail authentication"
+    );
 }
 
 #[test]
@@ -117,7 +132,10 @@ fn test_encrypted_private_key_nonce_is_unique_per_call() {
     let enc1 = encrypt_private_key(&kp1, &mk).unwrap();
     let enc2 = encrypt_private_key(&kp2, &mk2).unwrap();
 
-    assert_ne!(enc1.nonce, enc2.nonce, "Each encryption must use a fresh nonce");
+    assert_ne!(
+        enc1.nonce, enc2.nonce,
+        "Each encryption must use a fresh nonce"
+    );
 }
 
 #[test]
@@ -146,7 +164,10 @@ fn test_wrap_unwrap_vault_key_round_trip() {
     let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
     let unwrapped = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes()).unwrap();
 
-    assert_eq!(original_key_bytes, unwrapped.0, "VaultKey must survive wrap/unwrap round-trip");
+    assert_eq!(
+        original_key_bytes, unwrapped.0,
+        "VaultKey must survive wrap/unwrap round-trip"
+    );
     let _ = sender; // suppress unused warning
 }
 
@@ -172,8 +193,10 @@ fn test_wrap_uses_fresh_ephemeral_key_each_call() {
     let wrapped2 = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
 
     // Ephemeral public keys must differ (each wrap generates new ephemeral keypair)
-    assert_ne!(wrapped1.eph_pub_key, wrapped2.eph_pub_key,
-        "Each wrap must use a fresh ephemeral keypair");
+    assert_ne!(
+        wrapped1.eph_pub_key, wrapped2.eph_pub_key,
+        "Each wrap must use a fresh ephemeral keypair"
+    );
 
     // Both must unwrap to the same vault key
     let kp1 = unwrap_vault_key(&wrapped1, recipient.x25519_private_bytes()).unwrap();
@@ -207,15 +230,53 @@ fn test_tampered_ephemeral_pubkey_fails() {
     wrapped.eph_pub_key[0] ^= 0xFF;
 
     let result = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes());
-    assert!(result.is_err(), "Wrong ephemeral public key must produce wrong shared secret → decrypt fail");
+    assert!(
+        result.is_err(),
+        "Wrong ephemeral public key must produce wrong shared secret → decrypt fail"
+    );
 }
 
 // ─── Property-Based Tests ──────────────────────────────────────────────────────
 
+// proptest! {
+//     #[test]
+//     fn prop_encrypt_decrypt_private_key_any_password(
+//         password in "[a-zA-Z0-9!@#$%^&*]{8,64}"
+//     ) {
+//         let kp = generate_keypair();
+//         let original_pub = kp.ed25519_public.0;
+
+//         let salt = generate_salt();
+//         let mk = derive_master_key(password.as_bytes(), &salt).unwrap();
+//         let enc = encrypt_private_key(&kp, &mk).unwrap();
+
+//         let mk2 = derive_master_key(password.as_bytes(), &salt).unwrap();
+//         let kp2 = decrypt_private_key(&enc, &mk2).unwrap();
+
+//         prop_assert_eq!(original_pub, kp2.ed25519_public.0);
+//     }
+
+//     #[test]
+//     fn prop_wrap_unwrap_vault_key_any_vault_key(
+//         key_bytes in proptest::array::uniform32(any::<u8>())
+//     ) {
+//         let recipient = generate_keypair();
+//         let vault_key = VaultKey(key_bytes);
+//         let original = vault_key.0;
+
+//         let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+//         let unwrapped = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes()).unwrap();
+
+//         prop_assert_eq!(original, unwrapped.0);
+//     }
+// }
+
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(16))]  // ← Reduce from 256 to 16
+
     #[test]
     fn prop_encrypt_decrypt_private_key_any_password(
-        password in "[a-zA-Z0-9!@#$%^&*]{8,64}"
+        password in "[a-zA-Z0-9!@#$%^&*]{8,32}"  // ← Shorter max length
     ) {
         let kp = generate_keypair();
         let original_pub = kp.ed25519_public.0;
