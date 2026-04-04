@@ -4,23 +4,58 @@ version = "0.1.0"
 edition = "2021"
 description = "Zero-knowledge encryption primitives for evnx cloud sync"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/urwithajit9/evnx-crypto"
+readme = "README.md"
+keywords = ["cryptography", "zke", "env", "srp", "argon2"]
+categories = ["cryptography", "authentication"]
 
 [dependencies]
-argon2      = { version = "0.5", features = ["std"] }
-aes-gcm     = "0.10"
+# Key derivation for password hashing 
+argon2        = { version = "0.5", features = ["std"] }
+
+# Authenticated encryption 
+aes-gcm       = "0.10"
 chacha20poly1305 = "0.10"
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# Asymmetric cryptography 
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-hkdf        = "0.12"
-sha2        = "0.10"
-blake3      = "1"
-rand        = { version = "0.8", features = ["std"] }
-zeroize     = { version = "1.7", features = ["derive"] }
-srp         = "0.6"
-base64ct    = { version = "1", features = ["alloc"] }
-thiserror   = "1"
-serde       = { version = "1", features = ["derive"] }
+x25519-dalek  = { version = "2", features = ["static_secrets"] }
+
+# Key derivation for ECDH shared secret 
+hkdf          = "0.12"
+sha2          = "0.10"
+
+# Hashing 
+blake3        = "1"
+
+# SRP-6a implementation for password-authenticated key exchange
+# NOTE: srp crate uses SHA-1 internally by default for legacy compat.
+# We use it with SHA-256 via the generic interface.
+srp           = "0.6"
+
+# Randomness
+rand          = { version = "0.8", features = ["std"] }
+rand_core     = "0.6"
+
+# Memory safety
+zeroize       = { version = "1.7", features = ["derive"] }
+
+# Serialization (for SRP state and keypair export)
+serde         = { version = "1", features = ["derive"] }
+base64ct      = { version = "1", features = ["alloc"] }
+
+# Error handling
+thiserror     = "1"
 
 [dev-dependencies]
-proptest = "1"
-hex      = "0.4"
+proptest      = "1"
+hex           = "0.4"
+criterion     = { version = "0.5", features = ["html_reports"] }
+
+# [[bench]]
+# name = "kdf_bench"
+# harness = false
+
+# [[bench]]
+# name = "crypto_bench"
+# harness = false

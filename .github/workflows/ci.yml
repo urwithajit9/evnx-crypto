@@ -1,0 +1,58 @@
+# .github/workflows/ci.yml
+
+name: evnx-crypto CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Increase proptest iterations in CI for better coverage
+  PROPTEST_CASES: 500
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (zero warnings)
+        run: cargo clippy -- -D warnings
+
+      - name: Run all tests
+        run: cargo test --all
+
+      - name: Run integration tests explicitly
+        run: cargo test --test integration -- --nocapture
+
+      - name: Security audit
+        run: |
+          cargo install cargo-audit --quiet
+          cargo audit
+
+  bench:
+    name: Benchmark KDF timing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run KDF benchmark
+        run: cargo test --test kdf benchmark_derive_master_key -- --ignored --nocapture
+        # Expected output: ~300-500ms on GitHub Actions runners
+        # Fail if > 2000ms (system too slow) or < 50ms (parameters too weak)
