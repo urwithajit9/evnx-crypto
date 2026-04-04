@@ -402,7 +402,8 @@ fn new_xchacha_cipher(
 
     let mut nonce_bytes = [0u8; XCHACHA_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = XNonce::from_slice(&nonce_bytes).clone();
+    let nonce_ref = XNonce::from_slice(&nonce_bytes);
+    let nonce = *nonce_ref;
 
     Ok((cipher, nonce_bytes, nonce))
 }
@@ -425,7 +426,7 @@ fn new_xchacha_cipher_from_nonce(
     let cipher =
         XChaCha20Poly1305::new_from_slice(&key_bytes.0).map_err(|_| CryptoError::KeyUnwrap)?;
 
-    let nonce = XNonce::from_slice(nonce_bytes).clone();
+    let nonce = *XNonce::from_slice(nonce_bytes);
     Ok((cipher, *nonce_bytes, nonce))
 }
 

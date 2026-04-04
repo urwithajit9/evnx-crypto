@@ -53,6 +53,7 @@ pub fn encrypt_vault(plaintext: &[u8], vault_key: &VaultKey) -> Result<Encrypted
 /// - vault_key is wrong
 /// - ciphertext has been tampered with
 /// - nonce is wrong
+/// 
 /// Does NOT panic — always returns Result.
 pub fn decrypt_vault(blob: &EncryptedBlob, vault_key: &VaultKey) -> Result<Vec<u8>, CryptoError> {
     let key = Key::<Aes256Gcm>::from_slice(&vault_key.0);

@@ -31,6 +31,7 @@ pub fn generate_salt() -> [u8; SALT_LEN] {
 /// Used CLIENT-SIDE ONLY to:
 ///   1. Encrypt the Ed25519 private key at registration
 ///   2. Decrypt the Ed25519 private key at login
+/// 
 /// NEVER send master_key or password to the server.
 ///
 /// # Arguments
