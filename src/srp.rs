@@ -94,8 +94,14 @@ pub struct SrpClientProof {
 impl std::fmt::Debug for SrpClientProof {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SrpClientProof")
-            .field("client_proof", &format!("<{} bytes>", self.client_proof.len()))
-            .field("session_key", &format!("<{} bytes>", self.verifier.key().len()))
+            .field(
+                "client_proof",
+                &format!("<{} bytes>", self.client_proof.len()),
+            )
+            .field(
+                "session_key",
+                &format!("<{} bytes>", self.verifier.key().len()),
+            )
             .finish()
     }
 }
@@ -137,9 +143,9 @@ pub fn compute_verifier(
     // SRP: compute x = H(salt || password_bytes), then v = g^x mod N
     // API: compute_verifier(username, password, salt)
     let verifier = client.compute_verifier(
-        email.as_bytes(),           // username/identity
-        &srp_password_bytes,        // derived password bytes
-        &srp_salt,                  // salt
+        email.as_bytes(),    // username/identity
+        &srp_password_bytes, // derived password bytes
+        &srp_salt,           // salt
     );
 
     // Explicitly drop to trigger zeroize on sensitive data
@@ -220,11 +226,11 @@ pub fn compute_client_proof(
     // API: process_reply(private_a: &[u8], username, password, salt, server_public: &[u8])
     let verifier = client
         .process_reply(
-            &ephemeral.private_a,     // private ephemeral 'a' as bytes
-            email.as_bytes(),          // username/identity
-            &*srp_password_bytes,      // derived password bytes (dereference Zeroizing)
-            srp_salt,                  // salt
-            server_public_b,           // server's public ephemeral B (as bytes)
+            &ephemeral.private_a, // private ephemeral 'a' as bytes
+            email.as_bytes(),     // username/identity
+            &*srp_password_bytes, // derived password bytes (dereference Zeroizing)
+            srp_salt,             // salt
+            server_public_b,      // server's public ephemeral B (as bytes)
         )
         .map_err(|e| CryptoError::Srp(format!("SRP process_reply failed: {e:?}")))?;
 
@@ -259,12 +265,7 @@ pub fn verify_server_proof(
 ) -> Result<(), CryptoError> {
     // Use the stored verifier to check server's proof M2
     // API: verify_server(server_proof: &[u8]) -> Result<(), SrpError>
-    srp_proof
-        .verifier
-        .verify_server(server_proof)
-        .map_err(|_| {
-            CryptoError::Srp(
-                "Server proof verification failed — possible MITM or server error".into(),
-            )
-        })
+    srp_proof.verifier.verify_server(server_proof).map_err(|_| {
+        CryptoError::Srp("Server proof verification failed — possible MITM or server error".into())
+    })
 }

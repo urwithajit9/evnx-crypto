@@ -447,5 +447,3 @@ impl UserKeypair {
         &self.ed25519_private_seed
     }
 }
-
-
