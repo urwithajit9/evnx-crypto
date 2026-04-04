@@ -228,7 +228,7 @@ pub fn compute_client_proof(
         .process_reply(
             &ephemeral.private_a, // private ephemeral 'a' as bytes
             email.as_bytes(),     // username/identity
-            &srp_password_bytes, // derived password bytes (dereference Zeroizing)
+            &srp_password_bytes,  // derived password bytes (dereference Zeroizing)
             srp_salt,             // salt
             server_public_b,      // server's public ephemeral B (as bytes)
         )
