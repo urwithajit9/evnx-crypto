@@ -24,6 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 ///
 /// # Example
 /// ```rust
+/// # use evnx_crypto::zeroize::SecretBytes;
 /// let secret = SecretBytes::from(vec![1u8, 2, 3, 4]);
 /// // ... use secret.as_ref() ...
 /// // Automatically zeroed when `secret` goes out of scope.
@@ -174,6 +175,7 @@ impl<const N: usize> fmt::Debug for SecretArray<N> {
 ///
 /// # Example
 /// ```rust
+/// # use evnx_crypto::zeroize::zeroize_slice;
 /// let mut key_bytes = [0u8; 32];
 /// // ... fill and use key_bytes ...
 /// zeroize_slice(&mut key_bytes);

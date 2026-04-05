@@ -11,7 +11,8 @@ use evnx_crypto::{
     vault::VaultKey,
 };
 use proptest::prelude::*;
-use proptest::test_runner::ProptestConfig;
+// use proptest::test_runner::ProptestConfig;
+use proptest::prelude::ProptestConfig;
 
 // ─── Keypair Generation ────────────────────────────────────────────────────────
 

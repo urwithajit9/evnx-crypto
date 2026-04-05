@@ -432,17 +432,32 @@ fn new_xchacha_cipher_from_nonce(
 
 // ─── Accessor methods for tests ───────────────────────────────────────────────
 
+// impl UserKeypair {
+//     /// Access the X25519 private key bytes for ECDH unwrapping.
+//     /// Only expose to the crypto layer — never serialize or transmit.
+//     #[cfg(any(test, feature = "test-utils"))]
+//     #[allow(dead_code)]
+//     pub fn x25519_private_bytes(&self) -> &[u8; X25519_PRIVATE_LEN] {
+//         &self.x25519_private
+//     }
+
+//     /// Access the Ed25519 seed for signing operations.
+//     #[cfg(any(test, feature = "test-utils"))]
+//     #[allow(dead_code)]
+//     pub fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
+//         &self.ed25519_private_seed
+//     }
+// }
+
 impl UserKeypair {
     /// Access the X25519 private key bytes for ECDH unwrapping.
     /// Only expose to the crypto layer — never serialize or transmit.
-    #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
     pub fn x25519_private_bytes(&self) -> &[u8; X25519_PRIVATE_LEN] {
         &self.x25519_private
     }
 
     /// Access the Ed25519 seed for signing operations.
-    #[cfg(any(test, feature = "test-utils"))]
     #[allow(dead_code)]
     pub fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
         &self.ed25519_private_seed

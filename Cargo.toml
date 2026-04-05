@@ -51,6 +51,8 @@ thiserror     = "1"
 proptest      = "1"
 hex           = "0.4"
 criterion     = { version = "0.5", features = ["html_reports"] }
+srp      = "0.6"        # ← add this if missing
+sha2     = "0.10"       # ← add this if missing
 
 [features]
 test-utils = []  # Enables test accessor methods
