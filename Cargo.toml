@@ -47,12 +47,12 @@ base64ct      = { version = "1", features = ["alloc"] }
 # Error handling
 thiserror     = "1"
 
+# Hex encoding — SRP verifier is transmitted as hex, not base64
+hex           = "0.4"
+
 [dev-dependencies]
 proptest      = "1"
-hex           = "0.4"
 criterion     = { version = "0.5", features = ["html_reports"] }
-srp      = "0.6"        # ← add this if missing
-sha2     = "0.10"       # ← add this if missing
 
 [features]
 test-utils = []  # Enables test accessor methods

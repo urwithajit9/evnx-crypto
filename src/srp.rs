@@ -269,3 +269,21 @@ pub fn verify_server_proof(
         CryptoError::Srp("Server proof verification failed — possible MITM or server error".into())
     })
 }
+
+// ─── Wire Encoding ─────────────────────────────────────────────────────────────
+
+impl SrpVerifier {
+    /// The verifier as lowercase hex — the `srp_verifier` registration field.
+    ///
+    /// Hex, not base64: the server decodes this with `hex::decode` in
+    /// `srp_init` before handing it to the SRP server.
+    pub fn verifier_hex(&self) -> String {
+        hex::encode(&self.verifier)
+    }
+
+    /// The SRP salt as base64 — the `srp_salt` registration field.
+    /// Produces exactly 44 characters.
+    pub fn srp_salt_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.srp_salt)
+    }
+}

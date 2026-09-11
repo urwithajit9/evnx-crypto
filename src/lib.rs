@@ -14,7 +14,9 @@
 //! | `srp`     | SRP-6a client — verifier, ephemeral, proof, verification | 2 |
 //! | `zeroize` | Secure memory types for heap-allocated secrets | 2 |
 //! | `errors`  | `CryptoError` enum | 1 |
+//! | `encoding` | base64 / hex wire-format helpers shared by the modules above | 1 |
 
+pub mod encoding;
 pub mod errors;
 pub mod kdf;
 pub mod keypair;
@@ -23,8 +25,12 @@ pub mod vault;
 pub mod zeroize;
 
 // Re-export the most commonly used types at crate root
+pub use encoding::{b64_decode, b64_decode_array, b64_encode};
 pub use errors::CryptoError;
-pub use kdf::{derive_master_key, derive_srp_password, generate_salt, MasterKey};
+pub use kdf::{
+    derive_master_key, derive_srp_password, generate_salt, salt_from_base64, salt_to_base64,
+    MasterKey,
+};
 pub use keypair::{
     decrypt_private_key, encrypt_private_key, generate_keypair, unwrap_vault_key,
     wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey, UserKeypair, WrappedVaultKey,

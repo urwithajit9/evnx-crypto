@@ -74,6 +74,9 @@ const HKDF_INFO_PRIVATE_KEY_ENC: &[u8] = b"evnx-private-key-enc-v1";
 /// XChaCha20-Poly1305 key length.
 const XCHACHA_KEY_LEN: usize = 32;
 
+/// Poly1305 authentication tag length appended to every XChaCha20-Poly1305 ciphertext.
+const POLY1305_TAG_LEN: usize = 16;
+
 // ─── Public Key Types ─────────────────────────────────────────────────────────
 
 /// Ed25519 public key — 32 bytes, safe to share publicly.
@@ -461,5 +464,138 @@ impl UserKeypair {
     #[allow(dead_code)]
     pub fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
         &self.ed25519_private_seed
+    }
+}
+
+// ─── Wire Encoding ─────────────────────────────────────────────────────────────
+//
+// Every type below crosses the network as text inside JSON. The server stores
+// these values verbatim and never decodes them — it cannot, since it has no key.
+
+impl Ed25519PublicKey {
+    /// Encode as base64 for the `ed25519_public_key` registration field.
+    /// Produces exactly 44 characters.
+    pub fn to_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.0)
+    }
+
+    /// Decode from the base64 form returned by the server.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if not valid base64 or not 32 bytes.
+    pub fn from_base64(s: &str) -> Result<Self, CryptoError> {
+        Ok(Self(crate::encoding::b64_decode_array::<32>(
+            s,
+            "ed25519_public_key",
+        )?))
+    }
+}
+
+impl X25519PublicKeyBytes {
+    /// Encode as base64 for the `x25519_public_key` registration field.
+    /// Produces exactly 44 characters.
+    pub fn to_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.0)
+    }
+
+    /// Decode a recipient's public key from `GET /api/v1/users/{email}/public-key`.
+    ///
+    /// This is the entry point for vault sharing: the returned key is passed to
+    /// [`wrap_vault_key_for_user`].
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if not valid base64 or not 32 bytes.
+    pub fn from_base64(s: &str) -> Result<Self, CryptoError> {
+        Ok(Self(
+            crate::encoding::b64_decode_array::<X25519_PUBLIC_LEN>(s, "x25519_public_key")?,
+        ))
+    }
+}
+
+impl UserKeypair {
+    /// Ed25519 public key as base64 — for the registration payload.
+    pub fn ed25519_public_base64(&self) -> String {
+        self.ed25519_public.to_base64()
+    }
+
+    /// X25519 public key as base64 — for the registration payload.
+    ///
+    /// The server stores this in `users.x25519_public_key` so other users can
+    /// wrap vault keys for this account.
+    pub fn x25519_public_base64(&self) -> String {
+        self.x25519_public.to_base64()
+    }
+}
+
+impl EncryptedPrivateKey {
+    /// Serialize to a single base64 string: `base64(nonce || ciphertext)`.
+    ///
+    /// This is the exact format stored in `users.encrypted_private_key` and sent
+    /// as the `encrypted_private_key` registration field.
+    pub fn to_base64(&self) -> String {
+        let mut combined = Vec::with_capacity(self.nonce.len() + self.ciphertext.len());
+        combined.extend_from_slice(&self.nonce);
+        combined.extend_from_slice(&self.ciphertext);
+        crate::encoding::b64_encode(&combined)
+    }
+
+    /// Reconstruct from the base64 string returned by `GET /api/v1/auth/me`.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if the string is not valid base64, or is too
+    /// short to contain a nonce plus a Poly1305 tag.
+    pub fn from_base64(s: &str) -> Result<Self, CryptoError> {
+        let bytes = crate::encoding::b64_decode(s, "encrypted_private_key")?;
+
+        // Must hold at least the nonce and the 16-byte Poly1305 tag.
+        const MIN_LEN: usize = XCHACHA_NONCE_LEN + POLY1305_TAG_LEN;
+        if bytes.len() < MIN_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "encrypted_private_key: expected at least {MIN_LEN} bytes, got {}",
+                bytes.len()
+            )));
+        }
+
+        let mut nonce = [0u8; XCHACHA_NONCE_LEN];
+        nonce.copy_from_slice(&bytes[..XCHACHA_NONCE_LEN]);
+
+        Ok(Self {
+            nonce,
+            ciphertext: bytes[XCHACHA_NONCE_LEN..].to_vec(),
+        })
+    }
+}
+
+impl WrappedVaultKey {
+    /// The ECDH-wrapped vault key as base64 — the `encrypted_vault_key` API field.
+    pub fn encrypted_vault_key_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.encrypted_vault_key)
+    }
+
+    /// The sender's ephemeral X25519 public key as base64 — the `eph_pub_key` API field.
+    pub fn eph_pub_key_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.eph_pub_key)
+    }
+
+    /// Rebuild from the two base64 fields the server returns
+    /// (`GET /api/v1/vaults/{id}/my-key`).
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if either string is not valid base64, or if
+    /// `eph_pub_key_b64` does not decode to exactly 32 bytes.
+    pub fn from_base64(
+        encrypted_vault_key_b64: &str,
+        eph_pub_key_b64: &str,
+    ) -> Result<Self, CryptoError> {
+        Ok(Self {
+            eph_pub_key: crate::encoding::b64_decode_array::<X25519_PUBLIC_LEN>(
+                eph_pub_key_b64,
+                "eph_pub_key",
+            )?,
+            encrypted_vault_key: crate::encoding::b64_decode(
+                encrypted_vault_key_b64,
+                "encrypted_vault_key",
+            )?,
+        })
     }
 }

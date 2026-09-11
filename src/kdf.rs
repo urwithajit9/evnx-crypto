@@ -73,3 +73,21 @@ pub fn derive_srp_password(
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     Ok(output)
 }
+
+// ─── Wire Encoding ─────────────────────────────────────────────────────────────
+
+/// Encode a raw 32-byte salt as base64 for transmission to the server.
+///
+/// Produces exactly 44 characters — the length the server validates.
+pub fn salt_to_base64(salt: &[u8; SALT_LEN]) -> String {
+    crate::encoding::b64_encode(salt)
+}
+
+/// Decode a base64 salt received from the server.
+///
+/// # Errors
+/// [`CryptoError::InvalidInput`] if the string is not valid base64 or does not
+/// decode to exactly [`SALT_LEN`] bytes.
+pub fn salt_from_base64(s: &str) -> Result<[u8; SALT_LEN], CryptoError> {
+    crate::encoding::b64_decode_array::<SALT_LEN>(s, "salt")
+}
