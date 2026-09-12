@@ -34,19 +34,23 @@ pub struct SecretBytes(Zeroizing<Vec<u8>>);
 impl SecretBytes {
     /// Create from a raw byte vector.
     /// Ownership is transferred — the caller should not keep a copy.
+    /// Take ownership of bytes that must be cleared on drop.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self(Zeroizing::new(bytes))
     }
 
     /// Wrap an existing `Zeroizing<Vec<u8>>` (from argon2 / hkdf output).
+    /// Wrap an existing `Zeroizing` buffer.
     pub fn from_zeroizing(z: Zeroizing<Vec<u8>>) -> Self {
         Self(z)
     }
 
+    /// Number of bytes held.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// True if nothing is held.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -91,18 +95,22 @@ impl fmt::Display for SecretBytes {
 pub struct SecretString(Zeroizing<String>);
 
 impl SecretString {
+    /// Take ownership of a string that must be cleared on drop.
     pub fn new(s: String) -> Self {
         Self(Zeroizing::new(s))
     }
 
+    /// Borrow the string's bytes.
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 
+    /// Borrow the string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// True if nothing is held.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -138,15 +146,40 @@ impl fmt::Display for SecretString {
 /// stack-allocated but must be zeroized (e.g., intermediate
 /// HKDF outputs, nonce buffers used for a single operation).
 #[derive(Clone)]
-pub struct SecretArray<const N: usize>(pub [u8; N]);
+pub struct SecretArray<const N: usize>([u8; N]);
 
 impl<const N: usize> SecretArray<N> {
+    /// Take ownership of an array that must be cleared on drop.
     pub fn new(arr: [u8; N]) -> Self {
         Self(arr)
     }
 
+    /// An all-zero buffer, ready to be filled by a KDF.
     pub fn zeroed() -> Self {
         Self([0u8; N])
+    }
+
+    /// Borrow the bytes. Named `expose` so call sites read as a deliberate act.
+    pub fn expose(&self) -> &[u8; N] {
+        &self.0
+    }
+
+    /// Mutable access, for writing a derived key into the buffer.
+    ///
+    /// The only intended caller is a KDF expand step. Anything that overwrites
+    /// this buffer with non-secret data defeats the point of the type.
+    pub fn expose_mut(&mut self) -> &mut [u8; N] {
+        &mut self.0
+    }
+
+    /// Consume the wrapper and return the bytes.
+    ///
+    /// The returned array is **not** zeroized on drop — the caller takes over that
+    /// responsibility. Prefer [`SecretArray::expose`] unless ownership is required.
+    pub fn into_inner(mut self) -> [u8; N] {
+        let out = self.0;
+        self.0.zeroize();
+        out
     }
 }
 
@@ -183,16 +216,4 @@ impl<const N: usize> fmt::Debug for SecretArray<N> {
 /// ```
 pub fn zeroize_slice(buf: &mut [u8]) {
     buf.zeroize();
-}
-
-/// Verify (in a test context only) that a raw pointer's memory has been zeroed.
-///
-/// # Safety
-/// This is only for testing that `ZeroizeOnDrop` actually clears memory.
-/// The pointer must have been obtained BEFORE the value was dropped,
-/// and the pointed-to memory must still be accessible (e.g., stack-allocated).
-/// Using this in production code is undefined behavior.
-#[cfg(test)]
-pub unsafe fn read_raw_memory(ptr: *const u8, len: usize) -> Vec<u8> {
-    std::slice::from_raw_parts(ptr, len).to_vec()
 }

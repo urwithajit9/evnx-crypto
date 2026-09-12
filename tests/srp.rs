@@ -204,7 +204,7 @@ fn prop_different_passwords_different_verifiers_multiple() {
     let mut verifiers = Vec::new();
 
     for pw in passwords {
-        let srp_pw = derive_srp_password(*pw, &salt).unwrap(); // *pw dereferences &&[u8] to &[u8]
+        let srp_pw = derive_srp_password(pw, &salt).unwrap();
         let v = compute_verifier(email, srp_pw, salt).unwrap();
         verifiers.push(v.verifier);
     }
@@ -248,7 +248,7 @@ fn test_verifier_does_not_leak_password() {
 
     // Basic check: verifier shouldn't contain password bytes directly
     let password_str = String::from_utf8_lossy(password).to_lowercase();
-    let verifier_hex = format!("{:x?}", &verifier.verifier);
+    let verifier_hex = format!("{:x?}", verifier.verifier);
 
     assert!(
         !verifier_hex.to_lowercase().contains(&password_str),

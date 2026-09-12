@@ -119,7 +119,9 @@ pub struct UserKeypair {
 /// Format: `[24-byte XChaCha20 nonce || ciphertext || 16-byte poly1305 tag]`
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EncryptedPrivateKey {
+    /// Random 192-bit XChaCha20 nonce, fresh for every encryption.
     pub nonce: [u8; XCHACHA_NONCE_LEN],
+    /// Ciphertext with the Poly1305 tag appended.
     pub ciphertext: Vec<u8>,
 }
 
@@ -187,7 +189,7 @@ pub fn encrypt_private_key(
     master_key: &MasterKey,
 ) -> Result<EncryptedPrivateKey, CryptoError> {
     let (cipher, nonce_bytes, nonce) =
-        new_xchacha_cipher(&master_key.0, HKDF_INFO_PRIVATE_KEY_ENC)?;
+        new_xchacha_cipher(master_key.expose(), HKDF_INFO_PRIVATE_KEY_ENC)?;
 
     let ciphertext = cipher
         .encrypt(&nonce, keypair.ed25519_private_seed.as_ref())
@@ -212,7 +214,7 @@ pub fn decrypt_private_key(
     master_key: &MasterKey,
 ) -> Result<UserKeypair, CryptoError> {
     let (cipher, _, nonce) =
-        new_xchacha_cipher_from_nonce(&master_key.0, &enc.nonce, HKDF_INFO_PRIVATE_KEY_ENC)?;
+        new_xchacha_cipher_from_nonce(master_key.expose(), &enc.nonce, HKDF_INFO_PRIVATE_KEY_ENC)?;
 
     let seed_bytes = cipher
         .decrypt(&nonce, enc.ciphertext.as_ref())
@@ -260,9 +262,9 @@ fn derive_x25519_from_ed25519_seed(
 ) -> Result<[u8; X25519_PRIVATE_LEN], CryptoError> {
     let hkdf = Hkdf::<Sha256>::new(None, ed25519_seed);
     let mut x25519_private = SecretArray::<X25519_PRIVATE_LEN>::zeroed();
-    hkdf.expand(b"evnx-x25519-from-ed25519-v1", &mut x25519_private.0)
+    hkdf.expand(b"evnx-x25519-from-ed25519-v1", x25519_private.expose_mut())
         .map_err(|_| CryptoError::Kdf("HKDF expand failed for X25519 derivation".into()))?;
-    Ok(x25519_private.0)
+    Ok(x25519_private.into_inner())
 }
 
 // ─── ECDH Vault Key Wrapping ───────────────────────────────────────────────────
@@ -291,15 +293,23 @@ pub fn wrap_vault_key_for_user(
     let recipient_pubkey = X25519PublicKey::from(recipient_pub.0);
     let shared_secret = eph_secret.diffie_hellman(&recipient_pubkey);
 
+    // Reject low-order recipient keys. Curve25519 has eight points of small order;
+    // multiplying any of them by our scalar yields the identity, so the shared
+    // secret would be all-zero and independent of both private keys. Wrapping a
+    // vault key under such a secret would publish it to anyone who noticed.
+    if !shared_secret.was_contributory() {
+        return Err(CryptoError::InvalidPublicKey);
+    }
+
     // HKDF: derive 32-byte wrap key from shared secret
     // Domain separation ensures the wrap key is distinct from any
     // other key derived from the same shared secret.
-    let wrap_key = hkdf_derive_wrap_key(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
+    let wrap_key = crate::kdf::hkdf_subkey(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
 
     // Encrypt vault_key with wrap_key
-    let (cipher, nonce_bytes, nonce) = new_xchacha_cipher(&wrap_key.0, &[])?;
+    let (cipher, nonce_bytes, nonce) = new_xchacha_cipher(wrap_key.expose(), &[])?;
     let ciphertext = cipher
-        .encrypt(&nonce, vault_key.0.as_ref())
+        .encrypt(&nonce, vault_key.expose().as_ref())
         .map_err(|_| CryptoError::KeyWrap)?;
 
     // Prepend nonce to match WrappedVaultKey format spec
@@ -331,8 +341,17 @@ pub fn unwrap_vault_key(
     // ECDH: same shared secret as sender computed
     let shared_secret = my_static.diffie_hellman(&eph_pub);
 
+    // The critical check. A malicious server can put a low-order point in
+    // `eph_pub_key`, which forces the shared secret to all-zero regardless of our
+    // private key. The attacker can then derive the same wrap key and hand us a
+    // vault key of their choosing — we would encrypt the user's .env under a key
+    // they already know. Refuse before deriving anything.
+    if !shared_secret.was_contributory() {
+        return Err(CryptoError::InvalidPublicKey);
+    }
+
     // HKDF: derive the same wrap key
-    let wrap_key = hkdf_derive_wrap_key(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
+    let wrap_key = crate::kdf::hkdf_subkey(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
 
     // Decrypt: extract nonce from first 24 bytes if prepended,
     // OR use a fixed nonce stored in WrappedVaultKey.
@@ -348,7 +367,7 @@ pub fn unwrap_vault_key(
         .map_err(|_| CryptoError::InvalidInput("nonce extraction failed".into()))?;
     let ciphertext = &wrapped.encrypted_vault_key[XCHACHA_NONCE_LEN..];
 
-    let (cipher, _, nonce) = new_xchacha_cipher_from_nonce(&wrap_key.0, &nonce_bytes, &[])?;
+    let (cipher, _, nonce) = new_xchacha_cipher_from_nonce(wrap_key.expose(), &nonce_bytes, &[])?;
     let vault_key_bytes = cipher
         .decrypt(&nonce, ciphertext)
         .map_err(|_| CryptoError::KeyUnwrap)?;
@@ -361,22 +380,10 @@ pub fn unwrap_vault_key(
 
     let mut key = [0u8; 32];
     key.copy_from_slice(&vault_key_bytes);
-    Ok(VaultKey(key))
+    Ok(VaultKey::from_bytes(key))
 }
 
 // ─── Internal Helpers ──────────────────────────────────────────────────────────
-
-/// Derive a 32-byte XChaCha20-Poly1305 key via HKDF-SHA256.
-fn hkdf_derive_wrap_key(
-    input_key_material: &[u8],
-    info: &[u8],
-) -> Result<SecretArray<XCHACHA_KEY_LEN>, CryptoError> {
-    let hkdf = Hkdf::<Sha256>::new(None, input_key_material);
-    let mut key = SecretArray::<XCHACHA_KEY_LEN>::zeroed();
-    hkdf.expand(info, &mut key.0)
-        .map_err(|_| CryptoError::Kdf("HKDF expand failed for wrap key".into()))?;
-    Ok(key)
-}
 
 /// Create a new XChaCha20-Poly1305 cipher with a freshly derived key.
 ///
@@ -395,13 +402,13 @@ fn new_xchacha_cipher(
     } else {
         let hkdf = Hkdf::<Sha256>::new(None, raw_key);
         let mut derived = SecretArray::<XCHACHA_KEY_LEN>::zeroed();
-        hkdf.expand(info, &mut derived.0)
+        hkdf.expand(info, derived.expose_mut())
             .map_err(|_| CryptoError::Kdf("HKDF expand failed".into()))?;
         derived
     };
 
     let cipher =
-        XChaCha20Poly1305::new_from_slice(&key_bytes.0).map_err(|_| CryptoError::KeyWrap)?;
+        XChaCha20Poly1305::new_from_slice(key_bytes.expose()).map_err(|_| CryptoError::KeyWrap)?;
 
     let mut nonce_bytes = [0u8; XCHACHA_NONCE_LEN];
     OsRng.fill_bytes(&mut nonce_bytes);
@@ -421,13 +428,13 @@ fn new_xchacha_cipher_from_nonce(
     } else {
         let hkdf = Hkdf::<Sha256>::new(None, raw_key);
         let mut derived = SecretArray::<XCHACHA_KEY_LEN>::zeroed();
-        hkdf.expand(info, &mut derived.0)
+        hkdf.expand(info, derived.expose_mut())
             .map_err(|_| CryptoError::Kdf("HKDF expand failed".into()))?;
         derived
     };
 
-    let cipher =
-        XChaCha20Poly1305::new_from_slice(&key_bytes.0).map_err(|_| CryptoError::KeyUnwrap)?;
+    let cipher = XChaCha20Poly1305::new_from_slice(key_bytes.expose())
+        .map_err(|_| CryptoError::KeyUnwrap)?;
 
     let nonce = *XNonce::from_slice(nonce_bytes);
     Ok((cipher, *nonce_bytes, nonce))

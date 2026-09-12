@@ -2,12 +2,17 @@
 name = "evnx-crypto"
 version = "0.1.0"
 edition = "2021"
-description = "Zero-knowledge encryption primitives for evnx cloud sync"
-license = "MIT OR Apache-2.0"
+description = "Zero-knowledge encryption primitives for evnx cloud sync — Argon2id, AES-256-GCM, XChaCha20-Poly1305, X25519 ECDH and SRP-6a"
+license = "MIT"
 repository = "https://github.com/urwithajit9/evnx-crypto"
 readme = "README.md"
 keywords = ["cryptography", "zke", "env", "srp", "argon2"]
 categories = ["cryptography", "authentication"]
+# Verified by actually building on this toolchain, not guessed. 1.83 fails:
+# zeroize_derive 1.5 requires edition2024, which needs 1.85.
+rust-version = "1.85"
+authors = ["Ajit Kumar <ajitkumar.pu@gmail.com>"]
+homepage = "https://evnx.dev"
 
 [dependencies]
 # Key derivation for password hashing 
@@ -52,10 +57,16 @@ hex           = "0.4"
 
 [dev-dependencies]
 proptest      = "1"
-criterion     = { version = "0.5", features = ["html_reports"] }
+# Already regular dependencies; repeated here so the adversarial tests can drive
+# the SRP server half directly when checking the client's M2 verification.
+srp           = "0.6"
+sha2          = "0.10"
+hkdf          = "0.12"
 
 [features]
-test-utils = []  # Enables test accessor methods
+# Exposes `from_bytes_for_test` constructors that bypass the KDF. Required to run
+# this crate's own test suite; never enable it in a dependent.
+test-utils = []
 
 # [[bench]]
 # name = "kdf_bench"

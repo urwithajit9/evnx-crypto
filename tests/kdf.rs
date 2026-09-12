@@ -24,7 +24,8 @@ fn test_derive_master_key_deterministic() {
         .expect("derive_master_key should succeed with valid inputs");
 
     assert_eq!(
-        key1.0, key2.0,
+        key1.expose(),
+        key2.expose(),
         "Same password and salt must produce identical master keys (determinism required)"
     );
 }
@@ -42,7 +43,8 @@ fn test_derive_master_key_different_salts_produce_different_keys() {
     let key_b = derive_master_key(password, &salt_b).expect("derive_master_key should succeed");
 
     assert_ne!(
-        key_a.0, key_b.0,
+        key_a.expose(),
+        key_b.expose(),
         "Different salts must produce different master keys (avalanche effect)"
     );
 }
@@ -64,7 +66,7 @@ fn test_argon2_salt_and_srp_salt_produce_independent_outputs() {
 
     // Outputs must differ (different salts + different intended purposes)
     assert_ne!(
-        master_key.0.as_slice(),
+        master_key.expose().as_slice(),
         srp_password.as_slice(),
         "Master key and SRP password must be cryptographically independent"
     );
@@ -76,7 +78,8 @@ fn test_argon2_salt_and_srp_salt_produce_independent_outputs() {
         .expect("derive_srp_password should succeed with any salt");
 
     assert_ne!(
-        master_key.0, master_key_wrong_salt.0,
+        master_key.expose(),
+        master_key_wrong_salt.expose(),
         "Using SRP salt for master key derivation must produce different output"
     );
     assert_ne!(
@@ -121,7 +124,7 @@ fn test_derive_master_key_output_length() {
     let master_key = derive_master_key(password, &salt).expect("derive_master_key should succeed");
 
     assert_eq!(
-        master_key.0.len(),
+        master_key.expose().len(),
         MASTER_KEY_LEN,
         "Master key must be exactly {} bytes",
         MASTER_KEY_LEN
@@ -169,7 +172,8 @@ fn test_unicode_password_determinism() {
     let key2 = derive_master_key(password, &salt).expect("should succeed");
 
     assert_eq!(
-        key1.0, key2.0,
+        key1.expose(),
+        key2.expose(),
         "Unicode passwords must derive deterministically when bytes match"
     );
 }

@@ -75,7 +75,7 @@ fn test_secret_array_zeroed_on_drop() {
     let ptr: *const u8;
     {
         let secret = SecretArray::new(arr_bytes);
-        ptr = secret.0.as_ptr();
+        ptr = secret.expose().as_ptr();
         // Verify it's non-zero while alive
         assert!(unsafe { *ptr } == 0xFF);
         // Drop happens here

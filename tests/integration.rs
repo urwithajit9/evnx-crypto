@@ -65,7 +65,7 @@ fn test_full_registration_flow() {
 fn test_full_login_and_vault_push_pull_flow() {
     // ── Registration ──────────────────────────────────────────────────────
     let argon2_salt = generate_salt();
-    let srp_salt = generate_salt();
+    let _srp_salt = generate_salt();
 
     let master_key_reg = derive_master_key(TEST_PASSWORD.as_bytes(), &argon2_salt).unwrap();
     let keypair_reg = generate_keypair();
@@ -77,7 +77,7 @@ fn test_full_login_and_vault_push_pull_flow() {
 
     // ── Vault creation (server-side: generates VaultKey, wraps for owner) ─
     let vault_key_original = VaultKey::generate();
-    let original_key_bytes = vault_key_original.0;
+    let original_key_bytes = vault_key_original.expose();
     let wrapped_for_owner = wrap_vault_key_for_user(&vault_key_original, &x25519_pub).unwrap();
 
     // ── Login: re-derive master key, reconstruct keypair ─────────────────
@@ -104,11 +104,12 @@ fn test_full_login_and_vault_push_pull_flow() {
     let vault_key_push =
         unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
     assert_eq!(
-        vault_key_push.0, original_key_bytes,
+        vault_key_push.expose(),
+        original_key_bytes,
         "Unwrapped key must match original"
     );
 
-    let encrypted_blob = encrypt_vault(TEST_ENV, &vault_key_push).unwrap();
+    let encrypted_blob = encrypt_vault(TEST_ENV, &vault_key_push, b"").unwrap();
     println!(
         "✓ Push: encrypted {} bytes",
         encrypted_blob.ciphertext.len()
@@ -117,7 +118,7 @@ fn test_full_login_and_vault_push_pull_flow() {
     // ── Vault Pull: unwrap key again, decrypt .env ────────────────────────
     let vault_key_pull =
         unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
-    let decrypted = decrypt_vault(&encrypted_blob, &vault_key_pull).unwrap();
+    let decrypted = decrypt_vault(&encrypted_blob, &vault_key_pull, b"").unwrap();
     assert_eq!(
         decrypted, TEST_ENV,
         "Decrypted content must be byte-identical to original"
@@ -133,7 +134,7 @@ fn test_vault_sharing_flow() {
     let collab_keypair = generate_keypair();
 
     let vault_key = VaultKey::generate();
-    let original = vault_key.0;
+    let original = vault_key.expose();
 
     // Owner wraps vault key for themselves
     let wrapped_for_owner =
@@ -151,13 +152,14 @@ fn test_vault_sharing_flow() {
         unwrap_vault_key(&wrapped_for_collab, collab_keypair.x25519_private_bytes()).unwrap();
 
     assert_eq!(
-        vault_key_collab.0, original,
+        vault_key_collab.expose(),
+        original,
         "Collaborator must get same vault key"
     );
 
     // Owner encrypts, collaborator decrypts
-    let blob = encrypt_vault(TEST_ENV, &vault_key_owner).unwrap();
-    let decrypted = decrypt_vault(&blob, &vault_key_collab).unwrap();
+    let blob = encrypt_vault(TEST_ENV, &vault_key_owner, b"").unwrap();
+    let decrypted = decrypt_vault(&blob, &vault_key_collab, b"").unwrap();
     assert_eq!(decrypted, TEST_ENV);
 
     println!("✓ Vault sharing: owner wrapped for collab, collab decrypted");
@@ -170,17 +172,17 @@ fn test_solo_vault_master_key_wrap_flow() {
     let argon2_salt = generate_salt();
     let master_key = derive_master_key(b"solo-user-password", &argon2_salt).unwrap();
     let vault_key = VaultKey::generate();
-    let original = vault_key.0;
+    let original = vault_key.expose();
 
     let wrapped = wrap_vault_key_with_master_key(&vault_key, &master_key).unwrap();
     let master_key2 = derive_master_key(b"solo-user-password", &argon2_salt).unwrap();
     let unwrapped = unwrap_vault_key_with_master_key(&wrapped, &master_key2).unwrap();
-    assert_eq!(unwrapped.0, original);
+    assert_eq!(unwrapped.expose(), original);
 
-    let blob = encrypt_vault(TEST_ENV, &unwrapped).unwrap();
+    let blob = encrypt_vault(TEST_ENV, &unwrapped, b"").unwrap();
     let master_key3 = derive_master_key(b"solo-user-password", &argon2_salt).unwrap();
     let vk3 = unwrap_vault_key_with_master_key(&wrapped, &master_key3).unwrap();
-    let decrypted = decrypt_vault(&blob, &vk3).unwrap();
+    let decrypted = decrypt_vault(&blob, &vk3, b"").unwrap();
     assert_eq!(decrypted, TEST_ENV);
 
     println!("✓ Solo vault MasterKey wrap/unwrap + encrypt/decrypt");

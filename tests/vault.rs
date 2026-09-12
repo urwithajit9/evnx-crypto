@@ -1,8 +1,6 @@
 // tests/vault.rs
 use aes_gcm::aead::Aead;
-use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
-use chacha20poly1305::aead::Aead as XAead;
-use chacha20poly1305::{KeyInit as XKeyInit, XChaCha20Poly1305, XNonce};
+use aes_gcm::KeyInit;
 use proptest::prelude::*;
 use rand::RngCore;
 
@@ -21,7 +19,7 @@ use evnx_crypto::vault::{
 fn generate_test_master_key() -> MasterKey {
     let mut key = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut key);
-    MasterKey(key)
+    MasterKey::from_bytes_for_test(key)
 }
 
 /// Generate a random VaultKey for testing
@@ -38,8 +36,8 @@ fn test_encrypt_decrypt_round_trip_empty() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, &decrypted[..]);
 }
@@ -49,8 +47,8 @@ fn test_encrypt_decrypt_round_trip_small() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"KEY=value\nSECRET=topsecret\n";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, &decrypted[..]);
 }
@@ -61,8 +59,8 @@ fn test_encrypt_decrypt_round_trip_large() {
     let mut plaintext = vec![0u8; 1024 * 1024];
     rand::rngs::OsRng.fill_bytes(&mut plaintext);
 
-    let blob = encrypt_vault(&plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(&plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, decrypted);
 }
@@ -72,8 +70,8 @@ fn test_encrypt_decrypt_round_trip_binary_data() {
     let vault_key = generate_test_vault_key();
     let plaintext: Vec<u8> = (0..256).map(|i| i as u8).cycle().take(500).collect();
 
-    let blob = encrypt_vault(&plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(&plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, decrypted);
 }
@@ -87,9 +85,9 @@ proptest! {
     fn proptest_encrypt_decrypt_round_trip(plaintext in prop::collection::vec(any::<u8>(), 0..65536)) {
         let vault_key = generate_test_vault_key();
 
-        let blob = encrypt_vault(&plaintext, &vault_key)
+        let blob = encrypt_vault(&plaintext, &vault_key, b"")
             .expect("encryption should succeed");
-        let decrypted = decrypt_vault(&blob, &vault_key)
+        let decrypted = decrypt_vault(&blob, &vault_key, b"")
             .expect("decryption should succeed with correct key");
 
         prop_assert_eq!(plaintext, decrypted);
@@ -100,10 +98,10 @@ proptest! {
         let vault_key1 = generate_test_vault_key();
         let vault_key2 = generate_test_vault_key();
 
-        let blob = encrypt_vault(&plaintext, &vault_key1)
+        let blob = encrypt_vault(&plaintext, &vault_key1, b"")
             .expect("encryption should succeed");
 
-        let result = decrypt_vault(&blob, &vault_key2);
+        let result = decrypt_vault(&blob, &vault_key2, b"");
         prop_assert!(matches!(result, Err(CryptoError::Decryption)));
     }
 }
@@ -119,7 +117,7 @@ fn test_encrypt_generates_unique_nonces() {
 
     let mut nonces = std::collections::HashSet::new();
     for _ in 0..100 {
-        let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+        let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
         assert!(nonces.insert(blob.nonce), "Duplicate nonce generated!");
     }
 }
@@ -129,14 +127,14 @@ fn test_same_plaintext_different_ciphertexts() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"identical plaintext";
 
-    let blob1 = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
-    let blob2 = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let blob1 = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
+    let blob2 = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
 
     assert_ne!(blob1.nonce, blob2.nonce);
     assert_ne!(blob1.ciphertext, blob2.ciphertext);
 
-    let dec1 = decrypt_vault(&blob1, &vault_key).expect("decryption 1 failed");
-    let dec2 = decrypt_vault(&blob2, &vault_key).expect("decryption 2 failed");
+    let dec1 = decrypt_vault(&blob1, &vault_key, b"").expect("decryption 1 failed");
+    let dec2 = decrypt_vault(&blob2, &vault_key, b"").expect("decryption 2 failed");
     assert_eq!(dec1, dec2);
     assert_eq!(plaintext, &dec1[..]);
 }
@@ -151,20 +149,25 @@ fn test_wrong_key_returns_decryption_error_not_panic() {
     let wrong_key = generate_test_vault_key();
     let plaintext = b"secret data";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
-    let result = decrypt_vault(&blob, &wrong_key);
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
+    let result = decrypt_vault(&blob, &wrong_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
 #[test]
 fn test_corrupted_key_returns_decryption_error() {
-    let mut vault_key = generate_test_vault_key();
+    let vault_key = generate_test_vault_key();
     let plaintext = b"secret data";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
-    vault_key.0[0] ^= 0xFF;
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
 
-    let result = decrypt_vault(&blob, &vault_key);
+    // A key can no longer be mutated in place — it is built corrupted instead,
+    // which is closer to the real threat anyway: a wrong key, not a damaged one.
+    let mut corrupted_bytes = *vault_key.expose();
+    corrupted_bytes[0] ^= 0xFF;
+    let corrupted_key = VaultKey::from_bytes_for_test(corrupted_bytes);
+
+    let result = decrypt_vault(&blob, &corrupted_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -177,13 +180,13 @@ fn test_single_byte_tamper_in_ciphertext_returns_error() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"do not tamper";
 
-    let mut blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let mut blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
 
     if !blob.ciphertext.is_empty() {
         blob.ciphertext[0] ^= 0x01;
     }
 
-    let result = decrypt_vault(&blob, &vault_key);
+    let result = decrypt_vault(&blob, &vault_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -192,10 +195,10 @@ fn test_single_byte_tamper_in_nonce_returns_error() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"nonce tamper test";
 
-    let mut blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let mut blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
     blob.nonce[0] ^= 0x01;
 
-    let result = decrypt_vault(&blob, &vault_key);
+    let result = decrypt_vault(&blob, &vault_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -204,10 +207,10 @@ fn test_truncated_ciphertext_returns_error() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"truncation test";
 
-    let mut blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let mut blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
     blob.ciphertext.pop();
 
-    let result = decrypt_vault(&blob, &vault_key);
+    let result = decrypt_vault(&blob, &vault_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -216,10 +219,10 @@ fn test_appended_data_to_ciphertext_returns_error() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"append test";
 
-    let mut blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let mut blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
     blob.ciphertext.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
 
-    let result = decrypt_vault(&blob, &vault_key);
+    let result = decrypt_vault(&blob, &vault_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -240,7 +243,7 @@ fn test_wrap_unwrap_vault_key_round_trip() {
     let unwrapped =
         unwrap_vault_key_with_master_key(&wrapped, &master_key).expect("unwrapping failed");
 
-    assert_eq!(original_vault_key.0, unwrapped.0);
+    assert_eq!(original_vault_key.expose(), unwrapped.expose());
 }
 
 #[test]
@@ -271,12 +274,22 @@ fn test_unwrap_wrong_length_decrypted_key_returns_error() {
 
     let master_key = generate_test_master_key();
 
-    let cipher = XChaCha20Poly1305::new_from_slice(&master_key.0).unwrap();
+    // White-box: mirrors the implementation's key derivation so the test can forge
+    // a blob that authenticates but carries a wrong-length payload. The domain tag
+    // must stay in step with HKDF_INFO_VAULT_KEY_WRAP_MK in src/vault.rs.
+    //
+    // Note this is only reachable by someone who already holds the master key — the
+    // length check below is defence against our own bugs, not against an attacker.
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, master_key.expose());
+    let mut subkey = [0u8; 32];
+    hk.expand(b"evnx-vault-key-wrap-mk-v1", &mut subkey)
+        .unwrap();
+
+    let cipher = XChaCha20Poly1305::new_from_slice(&subkey).unwrap();
     let mut nonce_bytes = [0u8; XCHACHA_NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
 
-    // FIX: Use slice &short_key[..] instead of &[u8; 16]
     let short_key: [u8; 16] = [0u8; 16];
     let ciphertext = cipher.encrypt(nonce, &short_key[..]).unwrap();
 
@@ -312,14 +325,14 @@ fn test_vault_key_generate_produces_unique_keys() {
     let mut keys = std::collections::HashSet::new();
     for _ in 0..100 {
         let key = VaultKey::generate();
-        assert!(keys.insert(key.0), "Duplicate VaultKey generated!");
+        assert!(keys.insert(*key.expose()), "Duplicate VaultKey generated!");
     }
 }
 
 #[test]
 fn test_vault_key_has_correct_length() {
     let key = VaultKey::generate();
-    assert_eq!(key.0.len(), VAULT_KEY_LEN);
+    assert_eq!(key.expose().len(), VAULT_KEY_LEN);
 }
 
 // ============================================================================
@@ -331,7 +344,7 @@ fn test_encrypted_blob_contains_auth_tag() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"test";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
     assert!(blob.ciphertext.len() >= plaintext.len() + 16);
 }
 
@@ -340,7 +353,7 @@ fn test_nonce_has_correct_length() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"test";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encryption failed");
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encryption failed");
     assert_eq!(blob.nonce.len(), NONCE_LEN);
 }
 
@@ -353,8 +366,8 @@ fn test_encrypt_decrypt_with_all_zero_plaintext() {
     let vault_key = generate_test_vault_key();
     let plaintext = vec![0u8; 100];
 
-    let blob = encrypt_vault(&plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(&plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, decrypted);
 }
@@ -364,8 +377,8 @@ fn test_encrypt_decrypt_with_all_ones_plaintext() {
     let vault_key = generate_test_vault_key();
     let plaintext = vec![0xFFu8; 100];
 
-    let blob = encrypt_vault(&plaintext, &vault_key).expect("encryption failed");
-    let decrypted = decrypt_vault(&blob, &vault_key).expect("decryption failed");
+    let blob = encrypt_vault(&plaintext, &vault_key, b"").expect("encryption failed");
+    let decrypted = decrypt_vault(&blob, &vault_key, b"").expect("decryption failed");
 
     assert_eq!(plaintext, decrypted);
 }
@@ -378,7 +391,7 @@ fn test_decrypt_with_empty_ciphertext_returns_error() {
         ciphertext: vec![],
     };
 
-    let result = decrypt_vault(&blob, &vault_key);
+    let result = decrypt_vault(&blob, &vault_key, b"");
     assert!(matches!(result, Err(CryptoError::Decryption)));
 }
 
@@ -392,10 +405,10 @@ fn test_full_workflow_encrypt_wrap_unwrap_decrypt() {
     let vault_key = generate_test_vault_key();
     let plaintext = b"WORKFLOW_TEST=success\n";
 
-    let blob = encrypt_vault(plaintext, &vault_key).expect("encrypt failed");
+    let blob = encrypt_vault(plaintext, &vault_key, b"").expect("encrypt failed");
     let wrapped = wrap_vault_key_with_master_key(&vault_key, &master_key).expect("wrap failed");
     let unwrapped = unwrap_vault_key_with_master_key(&wrapped, &master_key).expect("unwrap failed");
-    let decrypted = decrypt_vault(&blob, &unwrapped).expect("decrypt failed");
+    let decrypted = decrypt_vault(&blob, &unwrapped, b"").expect("decrypt failed");
 
     assert_eq!(plaintext, &decrypted[..]);
 }
