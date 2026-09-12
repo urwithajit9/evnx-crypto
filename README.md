@@ -4,10 +4,50 @@
 
 [![Crates.io](https://img.shields.io/crates/v/evnx-crypto)](https://crates.io/crates/evnx-crypto)
 [![CI](https://github.com/urwithajit9/evnx-crypto/actions/workflows/ci.yml/badge.svg)](https://github.com/urwithajit9/evnx-crypto/actions)
-[![Security Audit](https://github.com/urwithajit9/evnx-crypto/actions/workflows/audit.yml/badge.svg)](https://github.com/urwithajit9/evnx-crypto/actions)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 A pure-Rust cryptographic library implementing the ZKE (Zero-Knowledge Encryption) protocol for evnx. The server **never** sees your password, master key, or plaintext `.env` contents — all sensitive operations run locally in this library.
+
+---
+
+## Capabilities
+
+| Area | What you get |
+|------|--------------|
+| **Password derivation** | Argon2id at OWASP 2024 parameters — 64 MiB, t=3, p=4. Two domain-separated outputs: a master key that never leaves the device, and an SRP input that proves identity without revealing the password. |
+| **Vault encryption** | AES-256-GCM, fresh random nonce per message, and AEAD associated data binding each blob to its vault and version — so an untrusted server cannot replay an old version as the current one. |
+| **Key wrapping** | XChaCha20-Poly1305 with 192-bit nonces, so random nonces never collide in practice. Every key is an HKDF-SHA256 subkey with its own domain tag; no key is ever the live cipher key for two purposes. |
+| **Team sharing** | X25519 ECDH to a recipient's public key, with a **contributory-behaviour check** that rejects low-order points — the defence against a server substituting a vault key it knows. |
+| **Authentication** | SRP-6a (2048-bit group, SHA-256). The password is never transmitted, and the client verifies the server's proof, so a rogue TLS certificate is not enough to impersonate the server. |
+| **One secret, two keypairs** | The X25519 key is HKDF-derived from the Ed25519 seed, so a single encrypted blob restores both on a new machine. |
+| **Memory hygiene** | Key material is `ZeroizeOnDrop`. Key types keep their bytes private, cannot be built from arbitrary input outside the crate, and redact themselves in `Debug` output. |
+| **No unsafe** | `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]` at the crate root. |
+
+### Design properties worth knowing
+
+- **The server is treated as hostile**, not merely curious. Every value arriving
+  from the network is attacker-controlled, and the library is written to stay safe
+  when it is.
+- **Errors do not leak.** `Decryption` does not distinguish a wrong key from
+  tampered ciphertext from mismatched associated data — telling them apart would
+  offer a decryption oracle.
+- **114 tests**, including [`tests/attacks.rs`](tests/attacks.rs): every low-order
+  Curve25519 point in both directions, ephemeral/ciphertext splicing, GCM tag
+  stripping, version rollback, cross-vault replay, non-recipient unwrap, tampered
+  SRP server proof, KDF collision under a reused salt, and `Debug` leakage. Each is
+  written against a stated threat, and several began life as working exploits.
+
+### Limits, stated plainly
+
+- **A weak password defeats all of it.** Argon2id raises the cost of a guess; it
+  does not make a bad password good.
+- **Variable *names* are stored in the clear** by evnx-server; values are encrypted.
+- **Shared vaults are not post-quantum safe** — the X25519 wrapping is vulnerable to
+  harvest-now-decrypt-later. Solo vaults are safe.
+- **Not externally audited.** Carefully reviewed, not certified.
+
+See **[docs/security-model.md](docs/security-model.md)** for the full threat model,
+what a server breach actually yields, and the post-quantum analysis.
 
 ---
 
@@ -135,7 +175,9 @@ use evnx_crypto::{
 
 // After fetching { encrypted_vault_key, eph_pub_key } from server:
 let vault_key = unwrap_vault_key(&wrapped, keypair.x25519_private_bytes())?;
-let blob      = encrypt_vault(env_file_bytes, &vault_key)?;
+// Bind the blob to its vault and version so an old one cannot be replayed.
+let aad       = vault_aad(&vault_id, base_version + 1);
+let blob      = encrypt_vault(env_file_bytes, &vault_key, &aad)?;
 
 // Send { nonce: blob.nonce, ciphertext: blob.ciphertext } to server for S3 upload
 ```
@@ -150,7 +192,8 @@ use evnx_crypto::{
 
 // After fetching { nonce, ciphertext } from server:
 let vault_key = unwrap_vault_key(&wrapped, keypair.x25519_private_bytes())?;
-let plaintext = decrypt_vault(&blob, &vault_key)?;
+let aad       = vault_aad(&vault_id, version_num);   // same values used to encrypt
+let plaintext = decrypt_vault(&blob, &vault_key, &aad)?;
 // Write plaintext to .env
 ```
 
@@ -200,11 +243,11 @@ pub fn VaultKey::generate() -> VaultKey;
 
 // Encrypt plaintext → EncryptedBlob { nonce, ciphertext }
 // Fresh random nonce per call. GCM auth tag embedded in ciphertext.
-pub fn encrypt_vault(plaintext: &[u8], key: &VaultKey) -> Result<EncryptedBlob, CryptoError>;
+pub fn encrypt_vault(plaintext: &[u8], key: &VaultKey, aad: &[u8]) -> Result<EncryptedBlob, CryptoError>;
 
 // Decrypt EncryptedBlob → plaintext
 // Returns Err(Decryption) on wrong key or tampered ciphertext. Never panics.
-pub fn decrypt_vault(blob: &EncryptedBlob, key: &VaultKey) -> Result<Vec<u8>, CryptoError>;
+pub fn decrypt_vault(blob: &EncryptedBlob, key: &VaultKey, aad: &[u8]) -> Result<Vec<u8>, CryptoError>;
 
 // Wrap VaultKey with user's MasterKey (solo vaults / backup)
 pub fn wrap_vault_key_with_master_key(vk: &VaultKey, mk: &MasterKey) -> Result<Vec<u8>, CryptoError>;
@@ -316,7 +359,9 @@ All library functions return `Result<T, CryptoError>`. No panics in library code
 | Password never transmitted | All derivation happens client-side before any network call |
 | Master key never stored | Derived fresh from password each session, ZeroizeOnDrop |
 | SRP verifier compromise ≠ vault access | argon2_salt and srp_salt are independent; different Argon2id calls |
-| AES-GCM nonce never reused | Fresh OsRng nonce per `encrypt_vault()` call |
+| AES-GCM nonce never reused | Fresh OsRng nonce per `encrypt_vault()` call; 96-bit random, budget 2³² messages per key |
+| Blob bound to its identity | AEAD associated data via `vault_aad(vault_id, version)` blocks version rollback |
+| ECDH key substitution blocked | Non-contributory (low-order) public keys rejected |
 | Tampering detected | AES-GCM and XChaCha20-Poly1305 auth tags; `Err(Decryption)` on failure |
 | ECDH ephemeral key erasure | `EphemeralSecret` (x25519-dalek) zeroizes on drop automatically |
 | Key material erased from heap | `ZeroizeOnDrop` on `MasterKey`, `VaultKey`, `UserKeypair`, proof types |
@@ -383,7 +428,7 @@ cargo clippy -- -D warnings
 
 ## License
 
-Licensed under MIT OR Apache-2.0 at your option.
+Licensed under the [MIT License](LICENSE), the same terms as the evnx CLI.
 
 ---
 
@@ -705,34 +750,44 @@ Represents an encrypted `.env` file. The nonce is stored in plaintext; the auth 
 ### Encrypt/Decrypt `.env` Data
 
 ```rust
-/// Encrypt plaintext with VaultKey using AES-256-GCM
+/// Encrypt plaintext with VaultKey using AES-256-GCM.
+/// `aad` binds the ciphertext to its identity — see `vault_aad`.
 pub fn encrypt_vault(
-    plaintext: &[u8], 
-    vault_key: &VaultKey
+    plaintext: &[u8],
+    vault_key: &VaultKey,
+    aad: &[u8],
 ) -> Result<EncryptedBlob, CryptoError>;
 
-/// Decrypt EncryptedBlob with VaultKey
+/// Decrypt EncryptedBlob. `aad` must match what it was sealed with.
 pub fn decrypt_vault(
-    blob: &EncryptedBlob, 
-    vault_key: &VaultKey
+    blob: &EncryptedBlob,
+    vault_key: &VaultKey,
+    aad: &[u8],
 ) -> Result<Vec<u8>, CryptoError>;
+
+/// Canonical associated data: length-prefixed vault id plus version.
+pub fn vault_aad(vault_id: &str, version: u32) -> Vec<u8>;
 ```
 
 #### Example
 
 ```rust
-use evnx_crypto::vault::{VaultKey, encrypt_vault, decrypt_vault};
+use evnx_crypto::vault::{VaultKey, encrypt_vault, decrypt_vault, vault_aad};
 
 let vault_key = VaultKey::generate();
 let env_content = b"DATABASE_URL=postgres://user:pass@localhost/db\n";
 
+// Bind this blob to the vault and version it belongs to. Without it, a server
+// could serve an older blob in its place and you would decrypt it happily.
+let aad = vault_aad("8b1f…-vault-id", 7);
+
 // Encrypt
-let blob = encrypt_vault(env_content, &vault_key)?;
+let blob = encrypt_vault(env_content, &vault_key, &aad)?;
 
 // Store blob.nonce and blob.ciphertext securely...
 
-// Later, decrypt
-let decrypted = decrypt_vault(&blob, &vault_key)?;
+// Later, decrypt with the same aad
+let decrypted = decrypt_vault(&blob, &vault_key, &aad)?;
 assert_eq!(env_content, &decrypted[..]);
 ```
 

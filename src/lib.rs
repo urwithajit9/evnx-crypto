@@ -44,7 +44,8 @@
 //! MasterKey ─ HKDF ─┬─ encrypts the Ed25519 private key seed
 //!                   └─ wraps VaultKeys for solo vaults
 //!
-//! Ed25519 seed ─ HKDF ─ X25519 private key   (one encrypted seed restores both)
+//! Ed25519 seed ─ HKDF ─ X25519 private key   (one encrypted seed restores both;
+//!                                             the Ed25519 half is not yet used to sign)
 //!
 //! VaultKey ─ AES-256-GCM ─ the .env ciphertext
 //!          └─ X25519-ECDH ─ HKDF ─ XChaCha20-Poly1305 ─ wrapped for a teammate
@@ -95,7 +96,7 @@
 //! | Vault encryption | AES-256-GCM | Hardware-accelerated; 96-bit random nonce, see [`encrypt_vault`] for the budget |
 //! | Key wrapping | XChaCha20-Poly1305 | 192-bit nonce — random nonces never collide in practice |
 //! | Key agreement | X25519 | Small, fast, misuse-resistant; contributory behaviour checked |
-//! | Signatures | Ed25519 | Deterministic, no nonce-reuse failure mode |
+//! | Identity keypair | Ed25519 | Seed is the single encrypted secret; the X25519 key is derived from it. **No signatures are produced yet** — the public key is registered for future use |
 //! | Subkey derivation | HKDF-SHA256 | Domain separation per purpose |
 //! | Authentication | SRP-6a (2048-bit, SHA-256) | The server verifies a password it never learns |
 
