@@ -161,7 +161,11 @@ fn test_compute_client_proof_different_salts_different_proofs() {
 
     let srp_pw1 = derive_srp_password(b"password", &salt1).unwrap();
     let eph1 = generate_client_ephemeral().unwrap();
-    let fake_server_b = vec![1u8; 256]; // placeholder
+    // An arbitrary well-formed B. This test compares two client proofs against
+    // the *same* B, so its value does not matter — only that it is non-zero, which
+    // compute_client_proof requires. A real exchange is covered in
+    // tests/readme_flows.rs and tests/attacks.rs.
+    let fake_server_b = vec![1u8; 256];
 
     let proof1 = compute_client_proof(email, srp_pw1, &salt1, &fake_server_b, &eph1).unwrap();
 

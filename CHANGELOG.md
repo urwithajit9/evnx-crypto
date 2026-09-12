@@ -48,6 +48,12 @@ system.
   directions, ephemeral/ciphertext splicing, GCM tag stripping, version rollback,
   cross-vault replay, non-recipient unwrap, tampered SRP server proof, and Debug
   leakage.
+- `tests/readme_flows.rs` — the README's Quick Start flows as compiled, executed
+  code. Writing it immediately caught a README example calling `compute_verifier`
+  with two arguments instead of three. Documentation that cannot drift silently.
+- `docs/security-model.md` — threat model, what a server breach actually yields,
+  an attack-by-attack walkthrough, post-quantum posture, and a limitations section.
+- `SECURITY.md` — private reporting process and scope.
 
 ### Changed
 
@@ -65,6 +71,14 @@ system.
 - `zeroize::read_raw_memory` — an unused `unsafe` helper. Its removal lets the
   crate forbid unsafe code outright.
 - `criterion` dev-dependency; both `[[bench]]` targets had been commented out.
+- `docs/kdf.md` and `docs/vault.md`. Both predated this release: roughly half their
+  code no longer compiled against the encapsulated key types and the AAD API, and
+  nothing linked to either. `docs/vault.md` was worse than stale — it documented
+  `POST /vault/encrypt` and `POST /vault/decrypt` server handlers, i.e. a server
+  that decrypts vaults, which is the opposite of this library's entire premise.
+  Shipping it would have taught readers to build the insecure thing. The accurate
+  material now lives in one place each: README for usage, rustdoc for the API,
+  `docs/security-model.md` for the threat model. Both files remain in git history.
 
 ### Documentation
 
