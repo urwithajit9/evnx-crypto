@@ -73,25 +73,45 @@ jobs:
             exit 1
           fi
 
-      # npm rejects a republish of an existing version. Detect it here and stop
-      # with a clear message instead of failing on an opaque EPUBLISHCONFLICT.
-      - name: Check the version is not already published
+      # npm rejects a republish of an existing version, but what that MEANS
+      # depends on why the run is here:
+      #
+      #   * the ref is the tag for this exact version, and it is already live —
+      #     the tag's goal is met. This is what a re-run after a spurious
+      #     "Wait for the registry" failure looks like (it happened on v0.1.1),
+      #     and it must finish green rather than fail on a conflict.
+      #   * anything else — Cargo.toml was not bumped. Stop and say so.
+      - name: Check the registry
         id: check
         run: |
           PKG=$(node -p "require('./pkg/package.json').version")
-          if npm view "@evnx/crypto-wasm@$PKG" version >/dev/null 2>&1; then
-            echo "::error::@evnx/crypto-wasm@$PKG is already published. Versions are immutable — bump Cargo.toml."
-            exit 1
-          fi
           echo "version=$PKG" >> "$GITHUB_OUTPUT"
 
+          if ! npm view "@evnx/crypto-wasm@$PKG" version >/dev/null 2>&1; then
+            echo "already_published=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # On a non-tag ref this expansion leaves GITHUB_REF untouched
+          # (refs/heads/main), which never equals a version — so a plain
+          # workflow_dispatch still fails on an unbumped version.
+          if [ "${GITHUB_REF#refs/tags/v}" = "$PKG" ]; then
+            echo "::notice::@evnx/crypto-wasm@$PKG is already live — nothing to publish for this tag."
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::error::@evnx/crypto-wasm@$PKG is already published. Versions are immutable — bump Cargo.toml."
+          exit 1
+
       - name: Validate the package (dry run)
+        if: steps.check.outputs.already_published != 'true'
         run: |
           cat pkg/package.json
           (cd pkg && npm publish --dry-run --access public)
 
       - name: Publish
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && steps.check.outputs.already_published != 'true' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         # No `|| true` and no `|| echo` here, deliberately. Swallowing a failed
@@ -100,24 +120,30 @@ jobs:
         run: (cd pkg && npm publish --access public --provenance)
 
       # npm's publish pipeline is asynchronous: the package is accepted before it
-      # is queryable. Poll the registry rather than install it, and give it a real
-      # budget — a 105-second one is what made @evnx/cli report failure after a
-      # successful publish.
+      # is queryable.
+      #
+      # This poll reports VISIBILITY, and visibility is not the success signal —
+      # `npm publish` returning 0 is, and the step above has no `|| true`, so a
+      # genuine publish failure already fails the job. On v0.1.1 the package took
+      # longer than five minutes to appear and this step failed a release that
+      # had in fact published, which then sent the re-run into the
+      # already-published guard. So: a longer budget, and a timeout that WARNS.
       - name: Wait for the registry
-        if: ${{ !inputs.dry_run }}
+        id: wait
+        if: ${{ !inputs.dry_run && steps.check.outputs.already_published != 'true' }}
         run: |
           V="${{ steps.check.outputs.version }}"
-          for i in $(seq 1 20); do
+          for i in $(seq 1 40); do
             if npm view "@evnx/crypto-wasm@$V" version >/dev/null 2>&1; then
-              echo "✓ @evnx/crypto-wasm@$V is live (after $((i*15))s)"
+              echo "✓ @evnx/crypto-wasm@$V is live (after $((i * 15))s)"
+              echo "visible=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "  not visible yet, attempt $i/20"
+            echo "  not visible yet, attempt $i/40"
             sleep 15
           done
-          echo "::error::@evnx/crypto-wasm@$V did not appear within 5 minutes."
-          echo "Check the registry directly before re-running — the publish may have succeeded."
-          exit 1
+          echo "visible=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::@evnx/crypto-wasm@$V was published but is not visible after 10 minutes. This is registry lag, not a failed publish — confirm with: npm view @evnx/crypto-wasm@$V version"
 
       - name: Summary
         if: always()
@@ -129,5 +155,12 @@ jobs:
             echo "|---|---|"
             echo "| version | \`${{ steps.check.outputs.version }}\` |"
             echo "| dry run | \`${{ inputs.dry_run || false }}\` |"
+            if [ "${{ steps.check.outputs.already_published }}" = "true" ]; then
+              echo "| outcome | already live — nothing published |"
+            elif [ "${{ steps.wait.outputs.visible }}" = "false" ]; then
+              echo "| outcome | published; not yet visible on the registry |"
+            elif [ "${{ steps.wait.outputs.visible }}" = "true" ]; then
+              echo "| outcome | published and live |"
+            fi
             echo "| wasm | \`$(stat -c%s pkg/*_bg.wasm 2>/dev/null || echo '?') bytes\` |"
           } >> "$GITHUB_STEP_SUMMARY"
