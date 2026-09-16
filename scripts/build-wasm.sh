@@ -71,12 +71,27 @@ if [ "${1:-}" = "--publish" ]; then
         cat >&2 <<'MSG'
 error: not authenticated to npm.
 
-  Interactive:   npm login
-  Or with a token, WITHOUT writing it to disk:
-                 NODE_AUTH_TOKEN=<token> ./scripts/build-wasm.sh --publish
+  Prefer CI. The `Publish @evnx/crypto-wasm` workflow handles this correctly:
+  actions/setup-node writes the .npmrc that makes the token work, and the token
+  lives in repository secrets rather than on a laptop.
 
-  The token needs read-write on the @evnx scope. Note that npm reports an
-  unauthorised publish as 404, not 403, so a permissions problem looks like a
+      gh workflow run publish-wasm.yml
+
+  To publish from here instead:
+
+      npm login
+
+  NOTE: `NODE_AUTH_TOKEN=<token> npm publish` does NOT work. npm never reads
+  that variable on its own — it only works in CI because actions/setup-node
+  writes an .npmrc line that references it:
+
+      //registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}
+
+  Without that line npm ignores the variable entirely and reports ENEEDAUTH,
+  which looks like a rejected token when the token is fine.
+
+  The token needs read-write on the @evnx scope. Note also that npm reports an
+  unauthorised publish as 404, not 403, so a permissions problem reads like a
   missing package.
 MSG
         exit 1
