@@ -66,7 +66,10 @@ impl VaultKeyHandle {
 /// blocks its thread for hundreds of milliseconds; on the main thread that is a
 /// frozen UI.
 #[wasm_bindgen(js_name = deriveMasterKey)]
-pub fn derive_master_key(password: &str, argon2_salt_b64: &str) -> Result<MasterKeyHandle, JsError> {
+pub fn derive_master_key(
+    password: &str,
+    argon2_salt_b64: &str,
+) -> Result<MasterKeyHandle, JsError> {
     let salt = salt_from_b64(argon2_salt_b64)?;
     Ok(MasterKeyHandle {
         inner: kdf::derive_master_key(password.as_bytes(), &salt).map_err(js)?,
