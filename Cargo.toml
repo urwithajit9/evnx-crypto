@@ -1,6 +1,6 @@
 [package]
 name = "evnx-crypto"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Zero-knowledge encryption primitives for evnx cloud sync — Argon2id, AES-256-GCM, XChaCha20-Poly1305, X25519 ECDH and SRP-6a"
 license = "MIT"
