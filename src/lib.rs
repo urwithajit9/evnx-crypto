@@ -108,6 +108,9 @@ pub mod srp;
 pub mod vault;
 pub mod zeroize;
 
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
 // Re-export the most commonly used types at crate root
 pub use encoding::{b64_decode, b64_decode_array, b64_encode};
 pub use errors::CryptoError;

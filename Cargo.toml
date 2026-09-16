@@ -14,6 +14,11 @@ rust-version = "1.85"
 authors = ["Ajit Kumar <ajitkumar.pu@gmail.com>"]
 homepage = "https://evnx.dev"
 
+# cdylib is what wasm-bindgen links; rlib keeps native consumers (the CLI, the
+# server) working unchanged. Both are produced, so nothing downstream changes.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 # Key derivation for password hashing 
 argon2        = { version = "0.5", features = ["std"] }
@@ -55,6 +60,20 @@ thiserror     = "1"
 # Hex encoding — SRP verifier is transmitted as hex, not base64
 hex           = "0.4"
 
+# Browser bindings — optional, pulled in only by the `wasm` feature.
+wasm-bindgen  = { version = "0.2", optional = true }
+
+# ─── WebAssembly ────────────────────────────────────────────────────────────
+# getrandom refuses to build for wasm32-unknown-unknown unless told where entropy
+# comes from, because the target has no ambient OS RNG. The "js" feature routes it
+# to crypto.getRandomValues() in the browser. Declared here as a direct dependency
+# even though we only use it through `rand`, because feature selection cannot be
+# expressed on a transitive dependency any other way — this is the documented fix.
+#
+# Target-scoped, so native builds are byte-for-byte unaffected.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 proptest      = "1"
 # Already regular dependencies; repeated here so the adversarial tests can drive
@@ -67,6 +86,14 @@ hkdf          = "0.12"
 # Exposes `from_bytes_for_test` constructors that bypass the KDF. Required to run
 # this crate's own test suite; never enable it in a dependent.
 test-utils = []
+
+# Browser bindings for the evnx web dashboard. Enables wasm-bindgen and the
+# `wasm` module. Deliberately NOT default: native consumers must not pay for it.
+#
+# Note this feature does NOT enable `test-utils`. The bindings hand out opaque
+# key handles obtained only by generation or authenticated unwrap, never from
+# caller-supplied bytes — the same invariant the crate enforces natively.
+wasm = ["dep:wasm-bindgen"]
 
 # [[bench]]
 # name = "kdf_bench"
