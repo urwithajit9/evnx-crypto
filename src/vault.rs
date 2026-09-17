@@ -91,6 +91,34 @@ pub struct EncryptedBlob {
     pub ciphertext: Vec<u8>,
 }
 
+/// The transport hash a push declares for its ciphertext: BLAKE3, lowercase hex.
+///
+/// # Why this lives here rather than in each caller
+///
+/// It was written out three times — in the CLI's push, in the server's push
+/// validation, and again in the server's download check — and the three agreed
+/// only by everyone independently choosing "BLAKE3 of the ciphertext, hex". The
+/// server **rejects** a push whose declared hash does not match what it computes,
+/// so any divergence is not a subtle bug but a hard failure at the worst moment.
+/// One definition, in the crate both ends already depend on, removes that.
+///
+/// # What it is and is not for
+///
+/// Transport integrity and storage-corruption detection. It is **not** the
+/// authenticity check: AES-256-GCM's tag already authenticates the ciphertext and
+/// its associated data under the vault key, which is strictly stronger because it
+/// is keyed — anyone can recompute a BLAKE3 hash over bytes they have modified.
+///
+/// So this exists to tell "the bytes changed in flight or at rest" apart from
+/// "the key or the version is wrong", and to give the server something to verify
+/// without ever holding a key. Do not add it to [`EncryptedBlob`]: the note there
+/// about not embedding an integrity hash still stands.
+///
+/// Hash the **ciphertext alone** — not the `nonce || ciphertext` blob as stored.
+pub fn blob_hash(ciphertext: &[u8]) -> String {
+    blake3::hash(ciphertext).to_hex().to_string()
+}
+
 /// Build the canonical associated data binding a blob to its identity.
 ///
 /// Pass the result to [`encrypt_vault`] and [`decrypt_vault`]. The encoding is

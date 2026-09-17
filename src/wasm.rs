@@ -17,8 +17,9 @@
 //! `localStorage`.
 //!
 //! A `VaultKey` is obtainable only two ways, exactly as in the crate proper:
-//! [`createVaultKey`] for a new vault, or [`unwrapVaultKey`] with the master key.
-//! Never from caller-supplied bytes.
+//! [`create_vault_key`] (`createVaultKey` in JS) for a new vault, or
+//! [`unwrap_vault_key`] (`unwrapVaultKey`) with the master key. Never from
+//! caller-supplied bytes.
 
 use wasm_bindgen::prelude::*;
 
@@ -120,6 +121,19 @@ pub fn unwrap_vault_key(wrapped: &[u8], mk: &MasterKeyHandle) -> Result<VaultKey
     Ok(VaultKeyHandle {
         inner: vault::unwrap_vault_key_with_master_key(wrapped, &mk.inner).map_err(js)?,
     })
+}
+
+/// The `blob_hash` a push must declare: BLAKE3 of the **ciphertext**, hex.
+///
+/// The server recomputes this and refuses a push that disagrees, so the browser
+/// cannot skip it. Pass the ciphertext alone — `encryptVault` returns
+/// `nonce || ciphertext`, so slice off the first 12 bytes first.
+///
+/// This is transport integrity, not authenticity: GCM's tag already covers that,
+/// keyed. See [`crate::vault::blob_hash`].
+#[wasm_bindgen(js_name = blobHash)]
+pub fn blob_hash(ciphertext: &[u8]) -> String {
+    vault::blob_hash(ciphertext)
 }
 
 // ─── Blob encryption ───────────────────────────────────────────────────────────

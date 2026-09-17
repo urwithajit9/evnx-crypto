@@ -7,8 +7,9 @@ use rand::RngCore;
 use evnx_crypto::errors::CryptoError;
 use evnx_crypto::kdf::MasterKey;
 use evnx_crypto::vault::{
-    decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key, wrap_vault_key_with_master_key,
-    EncryptedBlob, VaultKey, NONCE_LEN, VAULT_KEY_LEN, XCHACHA_NONCE_LEN,
+    blob_hash, decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key,
+    wrap_vault_key_with_master_key, EncryptedBlob, VaultKey, NONCE_LEN, VAULT_KEY_LEN,
+    XCHACHA_NONCE_LEN,
 };
 
 // ============================================================================
@@ -434,4 +435,56 @@ fn test_vault_key_implements_zeroize_on_drop() {
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>(_x: T) {}
     let key = VaultKey::generate();
     assert_zeroize_on_drop(key);
+}
+
+// ============================================================================
+// blob_hash — the transport hash a push declares
+// ============================================================================
+
+/// Pins the wire format against an independently computed value.
+///
+/// The server recomputes this hash and **rejects** a push that disagrees, so a
+/// change here does not degrade gracefully — it breaks every push at once.
+#[test]
+fn test_blob_hash_is_blake3_hex_of_the_ciphertext() {
+    let h = blob_hash(b"some ciphertext");
+
+    assert_eq!(h, blake3::hash(b"some ciphertext").to_hex().to_string());
+    assert_eq!(h.len(), 64, "hex of a 256-bit digest");
+    assert!(
+        h.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "lowercase hex, which is what the server compares against"
+    );
+}
+
+/// Guards against a stub returning a constant — which every assertion above
+/// would happily accept.
+#[test]
+fn test_blob_hash_distinguishes_inputs() {
+    assert_ne!(blob_hash(b"a"), blob_hash(b"b"));
+    assert_eq!(blob_hash(b"a"), blob_hash(b"a"));
+    // Empty input is legal and must not panic.
+    assert_eq!(blob_hash(b"").len(), 64);
+}
+
+/// The hash covers the **ciphertext alone**, never the stored `nonce || ciphertext`.
+///
+/// Getting this wrong is the likeliest mistake a new client makes: `encrypt_vault`
+/// hands back both halves, and hashing the concatenation produces a value the
+/// server refuses with a message about the hash rather than about the nonce.
+#[test]
+fn test_blob_hash_excludes_the_nonce() {
+    let vault_key = generate_test_vault_key();
+    let blob = encrypt_vault(b"KEY=value", &vault_key, b"aad").expect("encrypt failed");
+
+    let mut with_nonce = blob.nonce.to_vec();
+    with_nonce.extend_from_slice(&blob.ciphertext);
+
+    assert_eq!(blob_hash(&blob.ciphertext).len(), 64);
+    assert_ne!(
+        blob_hash(&blob.ciphertext),
+        blob_hash(&with_nonce),
+        "hashing nonce || ciphertext must not accidentally agree"
+    );
 }

@@ -128,7 +128,7 @@ pub use srp::{
     SrpClientEphemeral, SrpClientProof, SrpVerifier,
 };
 pub use vault::{
-    decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key, vault_aad,
+    blob_hash, decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key, vault_aad,
     wrap_vault_key_with_master_key, EncryptedBlob, VaultKey,
 };
 pub use zeroize::{zeroize_slice, SecretArray, SecretBytes, SecretString};
