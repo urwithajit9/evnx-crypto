@@ -31,6 +31,27 @@ chacha20poly1305 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek  = { version = "2", features = ["static_secrets"] }
 
+# Post-quantum KEM (FIPS 203), for the hybrid vault-key wrap.
+#
+# X25519 alone is broken by Shor, so a vault key shared with another member is
+# exposed to harvest-now-decrypt-later. The wrap key will come from an HKDF over
+# BOTH shared secrets, so it holds if either primitive survives.
+#
+# NOTE ON ITS rand_core: ml-kem pulls `kem 0.3`, which wants rand_core 0.10,
+# while this crate and both dalek crates are on the 0.6 line. Those trait
+# generations cannot satisfy one another — and never have to. Every ML-KEM
+# operation we need is RNG-free:
+#
+#   DecapsulationKey::from_seed   deterministic
+#   encapsulate_deterministic     the CALLER supplies 32 bytes
+#   decapsulate                   no RNG
+#
+# So `rand 0.8`'s OsRng supplies that randomness, exactly as it already does for
+# nonces and vault keys, and rand_core 0.10 is never touched by our code. Cargo
+# treats semver-incompatible versions as distinct crates, so both simply coexist.
+# Verified by building against these exact versions before adopting it.
+ml-kem        = "0.3"
+
 # Key derivation for ECDH shared secret 
 hkdf          = "0.12"
 sha2          = "0.10"
