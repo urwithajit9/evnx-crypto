@@ -50,7 +50,12 @@ x25519-dalek  = { version = "2", features = ["static_secrets"] }
 # nonces and vault keys, and rand_core 0.10 is never touched by our code. Cargo
 # treats semver-incompatible versions as distinct crates, so both simply coexist.
 # Verified by building against these exact versions before adopting it.
-ml-kem        = "0.3"
+#
+# The `zeroize` feature is NOT default and must be asked for by name. Without it
+# `DecapsulationKey` has no Drop impl at all, so an expanded ML-KEM private key
+# — ~2.4 KB of it — would be left in freed memory. Every other key type in this
+# crate is ZeroizeOnDrop; this one silently would not have been.
+ml-kem        = { version = "0.3", features = ["zeroize"] }
 
 # Key derivation for ECDH shared secret 
 hkdf          = "0.12"

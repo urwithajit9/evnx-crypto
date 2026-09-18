@@ -37,6 +37,8 @@ use chacha20poly1305::{
 };
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
+use ml_kem::kem::{Decapsulate as _, KeyExport as _};
+use ml_kem::{DecapsulationKey768, EncapsulationKey768, Key, Seed};
 use rand::rngs::OsRng;
 use rand_core::RngCore;
 use serde::{Deserialize, Serialize};
@@ -71,6 +73,49 @@ const HKDF_INFO_VAULT_KEY_WRAP: &[u8] = b"evnx-vault-key-wrap-v1";
 /// HKDF info string for private key encryption (different domain from vault wrap).
 const HKDF_INFO_PRIVATE_KEY_ENC: &[u8] = b"evnx-private-key-enc-v1";
 
+/// HKDF info string for deriving the ML-KEM-768 seed from the Ed25519 seed.
+///
+/// ⚠️ **This string can never change.** It is not a label — it is part of the
+/// key derivation. Changing it derives a different decapsulation key for every
+/// existing user, and every vault key already wrapped to the old public key
+/// becomes permanently unopenable. There is no migration that recovers from it,
+/// because the server holds only ciphertext.
+///
+/// A future parameter set gets a new string (`evnx/mlkem1024/v1`) alongside this
+/// one, never in place of it.
+const HKDF_INFO_MLKEM_DERIVE: &[u8] = b"evnx/mlkem768/v1";
+
+/// ML-KEM-768 seed length.
+///
+/// FIPS 203 key generation takes `d ‖ z` — 32 bytes of key-generation randomness
+/// and 32 bytes of implicit-rejection secret. The `ml-kem` crate takes both as
+/// one 64-byte `Seed`.
+const MLKEM_SEED_LEN: usize = 64;
+
+/// ML-KEM-768 encapsulation (public) key length, in bytes.
+///
+/// Measured against the crate rather than taken from the spec, and asserted in
+/// the test suite so a parameter-set mix-up cannot pass silently.
+pub const MLKEM768_PUBLIC_LEN: usize = 1184;
+
+/// ML-KEM-768 ciphertext length, in bytes.
+pub const MLKEM768_CIPHERTEXT_LEN: usize = 1088;
+
+/// ML-KEM shared-secret length, in bytes.
+pub const MLKEM_SHARED_SECRET_LEN: usize = 32;
+
+/// Compile-time proof that ml-kem's **non-default** `zeroize` feature is on.
+///
+/// Without it `DecapsulationKey` has no `Drop` impl, and ~2.4 KB of expanded
+/// ML-KEM private key would be left in freed memory — silently, with everything
+/// still compiling and every test still passing. A dependency edit that dropped
+/// the feature is exactly the change nobody would notice, so it fails the build
+/// here instead.
+const _: () = {
+    const fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<DecapsulationKey768>();
+};
+
 /// XChaCha20-Poly1305 key length.
 const XCHACHA_KEY_LEN: usize = 32;
 
@@ -88,6 +133,60 @@ pub struct Ed25519PublicKey(pub [u8; 32]);
 /// Used by vault owners to wrap vault keys for this user.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct X25519PublicKeyBytes(pub [u8; X25519_PUBLIC_LEN]);
+
+/// ML-KEM-768 encapsulation key — 1184 bytes, safe to share publicly.
+///
+/// The post-quantum half of the hybrid vault-key wrap. Published alongside the
+/// X25519 public key; a sender encapsulates to both and mixes the two shared
+/// secrets, so the wrap holds if *either* primitive survives.
+///
+/// Deliberately **not** `Serialize`/`Deserialize`: serde has no impl for arrays
+/// longer than 32, and adding `serde-big-array` to carry a value that only ever
+/// crosses the wire as base64 (see the `encoding` module) would be a dependency
+/// bought for nothing. Use [`MlKem768PublicKey::as_bytes`] and
+/// [`MlKem768PublicKey::from_bytes`].
+#[derive(Clone)]
+pub struct MlKem768PublicKey(pub [u8; MLKEM768_PUBLIC_LEN]);
+
+impl MlKem768PublicKey {
+    /// Borrow the raw encoding — 1184 bytes, safe to publish.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; MLKEM768_PUBLIC_LEN] {
+        &self.0
+    }
+
+    /// Parse a raw encoding received from the server.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `bytes` is not exactly
+    /// [`MLKEM768_PUBLIC_LEN`] long. The bytes are **not** otherwise validated
+    /// here; a malformed key is caught at encapsulation.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let arr: [u8; MLKEM768_PUBLIC_LEN] = bytes.try_into().map_err(|_| {
+            CryptoError::InvalidInput(format!(
+                "ML-KEM-768 public key must be {} bytes, got {}",
+                MLKEM768_PUBLIC_LEN,
+                bytes.len()
+            ))
+        })?;
+        Ok(Self(arr))
+    }
+}
+
+/// Hand-written because `[u8; 1184]` has no `Debug`, and because printing 1184
+/// bytes into a log line helps nobody even though the value is public.
+impl core::fmt::Debug for MlKem768PublicKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "MlKem768PublicKey({} bytes)", MLKEM768_PUBLIC_LEN)
+    }
+}
+
+impl PartialEq for MlKem768PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+impl Eq for MlKem768PublicKey {}
 
 // ─── Keypair Types ─────────────────────────────────────────────────────────────
 
@@ -111,6 +210,22 @@ pub struct UserKeypair {
     /// X25519 public key (32 bytes). Safe to transmit.
     #[zeroize(skip)]
     pub x25519_public: X25519PublicKeyBytes,
+
+    /// ML-KEM-768 decapsulation key, derived from `ed25519_private_seed`.
+    ///
+    /// Derived **eagerly**, at the same moment the X25519 key is, so that a
+    /// `UserKeypair` is always complete. The alternative — deriving on first
+    /// share — would move a ~1 ms key expansion off the unlock path and onto an
+    /// interactive one, and would put an `Option` in a struct whose whole
+    /// contract is that it holds a usable identity.
+    ///
+    /// `ZeroizeOnDrop` here comes from ml-kem's non-default `zeroize` feature,
+    /// which `Cargo.toml` asks for by name. The expanded form is ~2.4 KB.
+    mlkem_decap: DecapsulationKey768,
+
+    /// ML-KEM-768 encapsulation key (1184 bytes). Safe to transmit.
+    #[zeroize(skip)]
+    pub mlkem_public: MlKem768PublicKey,
 }
 
 /// Encrypted form of the Ed25519 private key seed.
@@ -166,11 +281,20 @@ pub fn generate_keypair() -> UserKeypair {
     // Store the raw bytes (StaticSecret doesn't implement ZeroizeOnDrop directly)
     let x25519_private = x25519_static.to_bytes();
 
+    // ML-KEM-768: DERIVE from the same Ed25519 seed, for the same reason X25519
+    // is derived — one encrypted seed reconstructs the whole identity, so adding
+    // a post-quantum key needs no second sealed blob, no schema change, and no
+    // re-prompt for the master password of an existing user.
+    let (mlkem_decap, mlkem_public) = derive_mlkem_from_ed25519_seed(&ed25519_private_seed)
+        .expect("HKDF derivation should never fail with valid inputs");
+
     UserKeypair {
         ed25519_private_seed,
         ed25519_public,
         x25519_private,
         x25519_public,
+        mlkem_decap,
+        mlkem_public,
     }
 }
 
@@ -244,11 +368,18 @@ pub fn decrypt_private_key(
     let x25519_static = StaticSecret::from(x25519_private);
     let x25519_public = X25519PublicKeyBytes(X25519PublicKey::from(&x25519_static).to_bytes());
 
+    // Same derivation as `generate_keypair`, which is what makes the ML-KEM key
+    // recoverable at all: nothing about it is stored, so unlocking an account on
+    // a new machine reproduces it byte for byte or not at all.
+    let (mlkem_decap, mlkem_public) = derive_mlkem_from_ed25519_seed(&seed)?;
+
     Ok(UserKeypair {
         ed25519_private_seed: seed,
         ed25519_public,
         x25519_private: x25519_static.to_bytes(),
         x25519_public,
+        mlkem_decap,
+        mlkem_public,
     })
 }
 
@@ -265,6 +396,128 @@ fn derive_x25519_from_ed25519_seed(
     hkdf.expand(b"evnx-x25519-from-ed25519-v1", x25519_private.expose_mut())
         .map_err(|_| CryptoError::Kdf("HKDF expand failed for X25519 derivation".into()))?;
     Ok(x25519_private.into_inner())
+}
+
+/// Derive the ML-KEM-768 keypair from the Ed25519 seed using HKDF.
+///
+/// Same construction as [`derive_x25519_from_ed25519_seed`], under a **different
+/// info string**, so the two derived keys are independent: learning one tells an
+/// attacker nothing about the other, and neither reveals the Ed25519 seed.
+///
+/// ## Why derive rather than generate
+///
+/// The alternative is a second random keypair sealed in a second blob. That
+/// needs a new column, a migration, and — for every existing user — a moment
+/// where they type their master password so the new private key can be sealed
+/// under it. Deriving needs none of that: `users.encrypted_private_key` stays a
+/// sealed 32-byte Ed25519 seed, exactly as it is today, and the ML-KEM key
+/// simply appears the next time that seed is unsealed.
+///
+/// ## The derivation is load-bearing forever
+///
+/// It is deterministic by requirement, not by convenience. A vault key wrapped
+/// to a user's ML-KEM public key can only be opened by re-deriving the identical
+/// decapsulation key from the identical seed. Any change to the info string, the
+/// hash, or the seed length is a silent, unrecoverable data loss for every
+/// shared vault. The test suite pins the derivation to a known answer for
+/// exactly this reason.
+fn derive_mlkem_from_ed25519_seed(
+    ed25519_seed: &[u8; ED25519_PRIVATE_LEN],
+) -> Result<(DecapsulationKey768, MlKem768PublicKey), CryptoError> {
+    let hkdf = Hkdf::<Sha256>::new(None, ed25519_seed);
+    let mut mlkem_seed = SecretArray::<MLKEM_SEED_LEN>::zeroed();
+    hkdf.expand(HKDF_INFO_MLKEM_DERIVE, mlkem_seed.expose_mut())
+        .map_err(|_| CryptoError::Kdf("HKDF expand failed for ML-KEM derivation".into()))?;
+
+    // FIPS 203 keygen takes d ‖ z. `ml-kem` wants them as one 64-byte Seed.
+    let seed = Seed::from(*mlkem_seed.expose());
+    let decap = DecapsulationKey768::from_seed(seed);
+    let public = MlKem768PublicKey::from_bytes(decap.encapsulation_key().to_bytes().as_slice())?;
+
+    Ok((decap, public))
+}
+
+// ─── ML-KEM Decapsulation ──────────────────────────────────────────────────────
+
+impl UserKeypair {
+    /// Recover the shared secret from a ciphertext encapsulated to our ML-KEM key.
+    ///
+    /// ⚠️ **ML-KEM never reports a wrong key.** FIPS 203 specifies *implicit
+    /// rejection*: a ciphertext that does not decapsulate correctly yields a
+    /// pseudo-random secret derived from the key's own `z` value, not an error.
+    /// That is deliberate — it denies an attacker the decryption oracle a plain
+    /// failure would hand them — but it means this function returning `Ok` says
+    /// nothing about whether the ciphertext was genuine.
+    ///
+    /// Authentication comes from the AEAD that consumes the derived wrap key: a
+    /// wrong secret produces a wrong key, and the Poly1305 tag fails. Never treat
+    /// a successful decapsulation as proof of anything on its own.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if `ciphertext` is not exactly
+    /// [`MLKEM768_CIPHERTEXT_LEN`] bytes.
+    pub fn mlkem_decapsulate(
+        &self,
+        ciphertext: &[u8],
+    ) -> Result<[u8; MLKEM_SHARED_SECRET_LEN], CryptoError> {
+        // `decapsulate` itself is INFALLIBLE — see the implicit-rejection note
+        // above — so the only error here is a length mismatch.
+        let shared = self
+            .mlkem_decap
+            .decapsulate_slice(ciphertext)
+            .map_err(|_| {
+                CryptoError::InvalidInput(format!(
+                    "ML-KEM-768 ciphertext must be {} bytes, got {}",
+                    MLKEM768_CIPHERTEXT_LEN,
+                    ciphertext.len()
+                ))
+            })?;
+
+        let mut secret = [0u8; MLKEM_SHARED_SECRET_LEN];
+        secret.copy_from_slice(shared.as_slice());
+        Ok(secret)
+    }
+}
+
+// ─── ML-KEM Encapsulation ──────────────────────────────────────────────────────
+
+/// Encapsulate a fresh shared secret to a recipient's ML-KEM-768 public key.
+///
+/// Returns `(ciphertext, shared_secret)`. The sender keeps the shared secret and
+/// publishes the ciphertext; the recipient recovers the same secret with
+/// [`UserKeypair::mlkem_decapsulate`].
+///
+/// ⚠️ **Not a vault-key wrap on its own, and must not be used as one.** The
+/// point of the hybrid is that neither primitive is trusted alone: ML-KEM is a
+/// young lattice scheme with no decades of cryptanalysis behind it, and X25519
+/// is broken by a sufficiently large quantum computer. A wrap key must come from
+/// an HKDF over *both* shared secrets so it holds if either survives. Using this
+/// function's output directly would trade one single point of failure for a
+/// different one.
+///
+/// # Errors
+/// [`CryptoError::InvalidPublicKey`] if the recipient's key is not a well-formed
+/// ML-KEM-768 encapsulation key.
+pub fn mlkem_encapsulate(
+    recipient_pub: &MlKem768PublicKey,
+) -> Result<(Vec<u8>, [u8; MLKEM_SHARED_SECRET_LEN]), CryptoError> {
+    let encoded = Key::<EncapsulationKey768>::try_from(recipient_pub.as_bytes().as_slice())
+        .map_err(|_| CryptoError::InvalidPublicKey)?;
+
+    let ek = EncapsulationKey768::new(&encoded).map_err(|_| CryptoError::InvalidPublicKey)?;
+
+    // OsRng from `rand 0.8` — the same source already used for nonces and vault
+    // keys. ml-kem's own RNG traits are on the rand_core 0.10 line, which is why
+    // this path supplies the randomness itself rather than handing over an Rng.
+    let mut m = [0u8; 32];
+    OsRng.fill_bytes(&mut m);
+    let m = ml_kem::B32::from(m);
+
+    let (ciphertext, shared) = ek.encapsulate_deterministic(&m);
+
+    let mut secret = [0u8; MLKEM_SHARED_SECRET_LEN];
+    secret.copy_from_slice(shared.as_slice());
+    Ok((ciphertext.as_slice().to_vec(), secret))
 }
 
 // ─── ECDH Vault Key Wrapping ───────────────────────────────────────────────────
@@ -438,6 +691,55 @@ fn new_xchacha_cipher_from_nonce(
 
     let nonce = *XNonce::from_slice(nonce_bytes);
     Ok((cipher, *nonce_bytes, nonce))
+}
+
+// ─── Test support ─────────────────────────────────────────────────────────────
+
+#[cfg(feature = "test-utils")]
+impl UserKeypair {
+    /// Reconstruct a keypair from a fixed Ed25519 seed, bypassing the CSPRNG.
+    ///
+    /// **Test support only.** Gated behind `test-utils` so it cannot appear in a
+    /// dependent's build by accident: outside tests a keypair must come from
+    /// [`generate_keypair`] or [`decrypt_private_key`], or an identity can be
+    /// created from a low-entropy seed the caller chose.
+    ///
+    /// This exists so the ML-KEM derivation can be pinned to a known answer. A
+    /// KAT is the only test that catches a *silent* change to the derivation —
+    /// round-trip tests all pass happily against a wrong-but-consistent key,
+    /// while every already-shared vault becomes unopenable.
+    ///
+    /// # Panics
+    /// If HKDF expansion fails, which cannot happen for these output lengths.
+    #[must_use]
+    pub fn from_ed25519_seed_for_test(seed: [u8; ED25519_PRIVATE_LEN]) -> Self {
+        let signing_key = SigningKey::from_bytes(&seed);
+        let ed25519_public = Ed25519PublicKey(signing_key.verifying_key().to_bytes());
+
+        let x25519_private =
+            derive_x25519_from_ed25519_seed(&seed).expect("HKDF cannot fail on a 32-byte output");
+        let x25519_static = StaticSecret::from(x25519_private);
+        let x25519_public = X25519PublicKeyBytes(X25519PublicKey::from(&x25519_static).to_bytes());
+
+        let (mlkem_decap, mlkem_public) =
+            derive_mlkem_from_ed25519_seed(&seed).expect("HKDF cannot fail on a 64-byte output");
+
+        Self {
+            ed25519_private_seed: seed,
+            ed25519_public,
+            x25519_private: x25519_static.to_bytes(),
+            x25519_public,
+            mlkem_decap,
+            mlkem_public,
+        }
+    }
+
+    /// The X25519 private key, for asserting that the two derivations are
+    /// independent. **Test support only.**
+    #[must_use]
+    pub fn x25519_private_for_test(&self) -> [u8; X25519_PRIVATE_LEN] {
+        self.x25519_private
+    }
 }
 
 // ─── Accessor methods for tests ───────────────────────────────────────────────

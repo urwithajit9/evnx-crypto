@@ -119,9 +119,10 @@ pub use kdf::{
     MasterKey,
 };
 pub use keypair::{
-    decrypt_private_key, encrypt_private_key, generate_keypair, unwrap_vault_key,
-    wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey, UserKeypair, WrappedVaultKey,
-    X25519PublicKeyBytes,
+    decrypt_private_key, encrypt_private_key, generate_keypair, mlkem_encapsulate,
+    unwrap_vault_key, wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey,
+    MlKem768PublicKey, UserKeypair, WrappedVaultKey, X25519PublicKeyBytes, MLKEM768_CIPHERTEXT_LEN,
+    MLKEM768_PUBLIC_LEN, MLKEM_SHARED_SECRET_LEN,
 };
 pub use srp::{
     compute_client_proof, compute_verifier, generate_client_ephemeral, verify_server_proof,
