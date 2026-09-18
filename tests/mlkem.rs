@@ -316,3 +316,206 @@ fn test_mlkem_public_key_does_not_contain_private_material() {
         "Ed25519 seed found inside the published ML-KEM public key"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// The hybrid wrap (F1 step 3)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use evnx_crypto::{unwrap_vault_key, wrap_vault_key_for_user, UserPublicKeys, VaultKey};
+
+#[test]
+fn test_hybrid_wrap_round_trip() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+    let unwrapped = unwrap_vault_key(&wrapped, &recipient).expect("unwrap");
+
+    assert_eq!(vault_key.expose(), unwrapped.expose());
+    assert_eq!(wrapped.mlkem_ciphertext.len(), MLKEM768_CIPHERTEXT_LEN);
+}
+
+/// ⚠️ **The test that proves the wrap is actually hybrid.**
+///
+/// Corrupting the ML-KEM ciphertext must break the unwrap. If it did not, the
+/// post-quantum half would be decorative — present on the wire, absent from the
+/// key — and F1 would have shipped a lie.
+///
+/// Note what makes this work: ML-KEM's implicit rejection means the corrupted
+/// ciphertext *decapsulates successfully* to a different secret. Nothing in the
+/// KEM reports a problem. The failure surfaces only at the AEAD tag.
+#[test]
+fn test_hybrid_wrap_breaks_if_mlkem_ciphertext_is_tampered() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+
+    wrapped.mlkem_ciphertext[0] ^= 0x01;
+
+    assert!(
+        unwrap_vault_key(&wrapped, &recipient).is_err(),
+        "the ML-KEM half does not contribute to the wrap key — the hybrid is fake"
+    );
+}
+
+/// The mirror image: the classical half must matter too. A hybrid that silently
+/// ignored X25519 would be a pure lattice scheme with extra bytes.
+#[test]
+fn test_hybrid_wrap_breaks_if_ephemeral_key_is_tampered() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+
+    wrapped.eph_pub_key[0] ^= 0x01;
+
+    assert!(
+        unwrap_vault_key(&wrapped, &recipient).is_err(),
+        "the X25519 half does not contribute to the wrap key"
+    );
+}
+
+/// Truncating the ML-KEM ciphertext must be refused outright rather than
+/// producing some shorter-but-workable path.
+#[test]
+fn test_hybrid_wrap_rejects_truncated_mlkem_ciphertext() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+
+    wrapped
+        .mlkem_ciphertext
+        .truncate(MLKEM768_CIPHERTEXT_LEN - 1);
+    assert!(unwrap_vault_key(&wrapped, &recipient).is_err());
+
+    wrapped.mlkem_ciphertext.clear();
+    assert!(
+        unwrap_vault_key(&wrapped, &recipient).is_err(),
+        "an empty ML-KEM ciphertext must not degrade to an X25519-only unwrap"
+    );
+}
+
+#[test]
+fn test_hybrid_wrap_is_not_openable_by_the_wrong_recipient() {
+    let alice = generate_keypair();
+    let mallory = generate_keypair();
+    let vault_key = VaultKey::generate();
+
+    let wrapped = wrap_vault_key_for_user(&vault_key, &alice.public_keys()).expect("wrap");
+    assert!(unwrap_vault_key(&wrapped, &mallory).is_err());
+    assert_eq!(
+        unwrap_vault_key(&wrapped, &alice).expect("alice").expose(),
+        vault_key.expose()
+    );
+}
+
+/// Every wrap is freshly randomised on both halves, so the same vault key wrapped
+/// twice for the same person shares no bytes.
+#[test]
+fn test_hybrid_wrap_is_randomised_on_both_halves() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+
+    let a = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+    let b = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+
+    assert_ne!(a.eph_pub_key, b.eph_pub_key);
+    assert_ne!(a.mlkem_ciphertext, b.mlkem_ciphertext);
+    assert_ne!(a.encrypted_vault_key, b.encrypted_vault_key);
+
+    // Both still open to the same vault key.
+    assert_eq!(
+        unwrap_vault_key(&a, &recipient).unwrap().expose(),
+        unwrap_vault_key(&b, &recipient).unwrap().expose()
+    );
+}
+
+/// Mixing a key bundle — Alice's X25519 beside Bob's ML-KEM — must produce
+/// something neither of them can open. It is the shape of a server that serves
+/// one honest key and one substituted one.
+#[test]
+fn test_hybrid_wrap_to_a_mixed_key_bundle_opens_for_nobody() {
+    let alice = generate_keypair();
+    let bob = generate_keypair();
+    let vault_key = VaultKey::generate();
+
+    let franken = UserPublicKeys {
+        x25519: alice.x25519_public.clone(),
+        mlkem: bob.mlkem_public.clone(),
+    };
+
+    let wrapped = wrap_vault_key_for_user(&vault_key, &franken).expect("wrap");
+    assert!(unwrap_vault_key(&wrapped, &alice).is_err());
+    assert!(unwrap_vault_key(&wrapped, &bob).is_err());
+}
+
+/// ⚠️ **Isolates the ML-KEM secret's contribution** rather than inferring it from
+/// a tampering test.
+///
+/// Corrupting a ciphertext changes the derived secret *and* the transcript at
+/// once, so a passing tamper test is also consistent with a combiner that only
+/// hashes the transcript. This reproduces the documented combiner exactly, and
+/// shows that substituting the ML-KEM secret alone — every other input held
+/// identical — yields a different wrap key.
+///
+/// It also serves as the executable spec of the construction:
+/// `HKDF-SHA256(ss_mlkem ‖ ss_x25519 ‖ ct_mlkem ‖ eph_pub ‖ recipient_x25519_pub,
+/// "evnx-vault-key-wrap-v2")`.
+#[test]
+fn test_hybrid_combiner_depends_on_the_mlkem_secret_itself() {
+    use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
+
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).expect("wrap");
+
+    let ss_mlkem = recipient
+        .mlkem_decapsulate(&wrapped.mlkem_ciphertext)
+        .expect("decapsulate");
+
+    // The X25519 half, computed the way the crate does.
+    let ss_x25519 = {
+        use x25519_dalek::{PublicKey, StaticSecret};
+        let mine = StaticSecret::from(recipient.x25519_private_for_test());
+        let eph = PublicKey::from(wrapped.eph_pub_key);
+        *mine.diffie_hellman(&eph).as_bytes()
+    };
+
+    let combine = |ss_m: &[u8; 32]| -> [u8; 32] {
+        let mut ikm = Vec::new();
+        ikm.extend_from_slice(ss_m);
+        ikm.extend_from_slice(&ss_x25519);
+        ikm.extend_from_slice(&wrapped.mlkem_ciphertext);
+        ikm.extend_from_slice(&wrapped.eph_pub_key);
+        ikm.extend_from_slice(&recipient.x25519_public.0);
+        let mut out = [0u8; 32];
+        Hkdf::<Sha256>::new(None, &ikm)
+            .expand(b"evnx-vault-key-wrap-v2", &mut out)
+            .expect("expand");
+        out
+    };
+
+    let open = |key: [u8; 32]| -> bool {
+        let nonce = &wrapped.encrypted_vault_key[..24];
+        let ct = &wrapped.encrypted_vault_key[24..];
+        XChaCha20Poly1305::new_from_slice(&key)
+            .expect("key")
+            .decrypt(XNonce::from_slice(nonce), ct)
+            .is_ok()
+    };
+
+    // The real secret reproduces the wrap key — so the construction above IS the
+    // one the crate uses, and this test is checking the real thing.
+    assert!(
+        open(combine(&ss_mlkem)),
+        "the documented combiner does not reproduce the wrap key — the doc is wrong"
+    );
+
+    // Change ONLY the ML-KEM secret. Transcript, X25519 secret, info string all
+    // identical. If the wrap key survived that, the PQ half would be inert.
+    let mut wrong = ss_mlkem;
+    wrong[0] ^= 0x01;
+    assert!(
+        !open(combine(&wrong)),
+        "the wrap key does not depend on the ML-KEM shared secret"
+    );
+}

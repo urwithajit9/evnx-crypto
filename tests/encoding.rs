@@ -8,7 +8,7 @@
 use evnx_crypto::{
     derive_master_key, encrypt_private_key, generate_keypair, generate_salt, salt_from_base64,
     salt_to_base64, wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey, VaultKey,
-    WrappedVaultKey, X25519PublicKeyBytes,
+    WrappedVaultKey, X25519PublicKeyBytes, MLKEM768_CIPHERTEXT_LEN,
 };
 use proptest::prelude::*;
 
@@ -126,27 +126,59 @@ fn encrypted_private_key_rejects_truncated_input() {
 fn wrapped_vault_key_round_trips() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
-    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     let rebuilt = WrappedVaultKey::from_base64(
         &wrapped.encrypted_vault_key_base64(),
         &wrapped.eph_pub_key_base64(),
+        &wrapped.mlkem_ciphertext_base64(),
     )
     .unwrap();
 
     assert_eq!(rebuilt.eph_pub_key, wrapped.eph_pub_key);
+    assert_eq!(rebuilt.mlkem_ciphertext, wrapped.mlkem_ciphertext);
     assert_eq!(rebuilt.encrypted_vault_key, wrapped.encrypted_vault_key);
+
+    // 1088 bytes of ciphertext is 1452 base64 characters — the number a server
+    // author will size a column against.
+    assert_eq!(wrapped.mlkem_ciphertext.len(), MLKEM768_CIPHERTEXT_LEN);
+    assert_eq!(wrapped.mlkem_ciphertext_base64().len(), 1452);
+}
+
+#[test]
+fn wrapped_vault_key_rejects_wrong_length_mlkem_ciphertext() {
+    let recipient = generate_keypair();
+    let vault_key = VaultKey::generate();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
+
+    for len in [0usize, 1087, 1089] {
+        let bad = evnx_crypto::b64_encode(&vec![0u8; len]);
+        assert!(
+            WrappedVaultKey::from_base64(
+                &wrapped.encrypted_vault_key_base64(),
+                &wrapped.eph_pub_key_base64(),
+                &bad,
+            )
+            .is_err(),
+            "{len}-byte ML-KEM ciphertext must be refused at parse time, not at unwrap"
+        );
+    }
 }
 
 #[test]
 fn wrapped_vault_key_rejects_bad_ephemeral_key() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
-    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     // eph_pub_key must be exactly 32 bytes.
     let bad_eph = evnx_crypto::b64_encode(&[9u8; 31]);
-    assert!(WrappedVaultKey::from_base64(&wrapped.encrypted_vault_key_base64(), &bad_eph).is_err());
+    assert!(WrappedVaultKey::from_base64(
+        &wrapped.encrypted_vault_key_base64(),
+        &bad_eph,
+        &wrapped.mlkem_ciphertext_base64(),
+    )
+    .is_err());
 }
 
 /// The arguments are easy to transpose at the call site; confirm the order is
@@ -155,11 +187,12 @@ fn wrapped_vault_key_rejects_bad_ephemeral_key() {
 fn wrapped_vault_key_argument_order_is_not_reversible() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
-    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     let swapped = WrappedVaultKey::from_base64(
         &wrapped.eph_pub_key_base64(),
         &wrapped.encrypted_vault_key_base64(),
+        &wrapped.mlkem_ciphertext_base64(),
     );
 
     // encrypted_vault_key is longer than 32 bytes, so it fails the eph length check.

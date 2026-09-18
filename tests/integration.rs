@@ -69,7 +69,9 @@ fn test_full_login_and_vault_push_pull_flow() {
 
     let master_key_reg = derive_master_key(TEST_PASSWORD.as_bytes(), &argon2_salt).unwrap();
     let keypair_reg = generate_keypair();
-    let x25519_pub = keypair_reg.x25519_public.clone();
+    // Both public keys, exactly as the registration payload carries them — the
+    // sender never sees the recipient's keypair, only these.
+    let recipient_pub = keypair_reg.public_keys();
     let enc_private_key = encrypt_private_key(&keypair_reg, &master_key_reg).unwrap();
 
     drop(keypair_reg);
@@ -78,7 +80,7 @@ fn test_full_login_and_vault_push_pull_flow() {
     // ── Vault creation (server-side: generates VaultKey, wraps for owner) ─
     let vault_key_original = VaultKey::generate();
     let original_key_bytes = vault_key_original.expose();
-    let wrapped_for_owner = wrap_vault_key_for_user(&vault_key_original, &x25519_pub).unwrap();
+    let wrapped_for_owner = wrap_vault_key_for_user(&vault_key_original, &recipient_pub).unwrap();
 
     // ── Login: re-derive master key, reconstruct keypair ─────────────────
     // (No SRP server simulation needed — srp.rs tests cover SRP round-trips)
@@ -88,7 +90,7 @@ fn test_full_login_and_vault_push_pull_flow() {
 
     // Verify keypair public keys are consistent after reconstruction
     assert_eq!(
-        keypair_login.x25519_public.0, x25519_pub.0,
+        keypair_login.x25519_public.0, recipient_pub.x25519.0,
         "Reconstructed X25519 public key must match original"
     );
 
@@ -101,8 +103,7 @@ fn test_full_login_and_vault_push_pull_flow() {
     );
 
     // ── Vault Push: unwrap key, encrypt .env ─────────────────────────────
-    let vault_key_push =
-        unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
+    let vault_key_push = unwrap_vault_key(&wrapped_for_owner, &keypair_login).unwrap();
     assert_eq!(
         vault_key_push.expose(),
         original_key_bytes,
@@ -116,8 +117,7 @@ fn test_full_login_and_vault_push_pull_flow() {
     );
 
     // ── Vault Pull: unwrap key again, decrypt .env ────────────────────────
-    let vault_key_pull =
-        unwrap_vault_key(&wrapped_for_owner, keypair_login.x25519_private_bytes()).unwrap();
+    let vault_key_pull = unwrap_vault_key(&wrapped_for_owner, &keypair_login).unwrap();
     let decrypted = decrypt_vault(&encrypted_blob, &vault_key_pull, b"").unwrap();
     assert_eq!(
         decrypted, TEST_ENV,
@@ -138,18 +138,16 @@ fn test_vault_sharing_flow() {
 
     // Owner wraps vault key for themselves
     let wrapped_for_owner =
-        wrap_vault_key_for_user(&vault_key, &owner_keypair.x25519_public).unwrap();
+        wrap_vault_key_for_user(&vault_key, &owner_keypair.public_keys()).unwrap();
 
     // Owner unwraps their copy, re-wraps for collaborator
-    let vault_key_owner =
-        unwrap_vault_key(&wrapped_for_owner, owner_keypair.x25519_private_bytes()).unwrap();
+    let vault_key_owner = unwrap_vault_key(&wrapped_for_owner, &owner_keypair).unwrap();
 
     let wrapped_for_collab =
-        wrap_vault_key_for_user(&vault_key_owner, &collab_keypair.x25519_public).unwrap();
+        wrap_vault_key_for_user(&vault_key_owner, &collab_keypair.public_keys()).unwrap();
 
     // Collaborator unwraps their copy
-    let vault_key_collab =
-        unwrap_vault_key(&wrapped_for_collab, collab_keypair.x25519_private_bytes()).unwrap();
+    let vault_key_collab = unwrap_vault_key(&wrapped_for_collab, &collab_keypair).unwrap();
 
     assert_eq!(
         vault_key_collab.expose(),

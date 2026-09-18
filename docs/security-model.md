@@ -80,7 +80,14 @@ registration — and that belongs in the CLI, not in this crate.
 
 ### The short version
 
-**Solo vaults are post-quantum safe today. Shared vaults are not.**
+**Both solo and shared vaults are post-quantum safe as of 0.2.0.**
+
+> Updated 2026-09-18. Before 0.2.0 shared vaults were **not**: the vault key was
+> wrapped under X25519 ECDH alone, so every secret ever shared was exposed to
+> harvest-now-decrypt-later. 0.2.0 replaces that with a hybrid
+> X25519 + ML-KEM-768 wrap. The rest of this section is kept as written because
+> the reasoning is what justifies the change — the ❌ rows below are the state it
+> fixed.
 
 ### Component by component
 
@@ -90,7 +97,8 @@ registration — and that belongs in the CLI, not in this crate.
 | AES-256-GCM | Grover halves it: 256 → ~128-bit effective | ✅ Safe |
 | XChaCha20-Poly1305 | Grover: 256 → ~128-bit | ✅ Safe |
 | SHA-256 / BLAKE3 | Grover; still ≥128-bit | ✅ Safe |
-| **X25519 ECDH** | **Shor breaks it outright** | ❌ **Vulnerable** |
+| **X25519 ECDH, alone** | **Shor breaks it outright** | ❌ was vulnerable |
+| **X25519 + ML-KEM-768 hybrid** | Shor breaks the X25519 half; the ML-KEM half is a lattice scheme with no known quantum attack | ✅ **Safe as of 0.2.0** |
 | **SRP-6a (2048-bit group)** | **Shor solves the discrete log** | ❌ Vulnerable |
 | Ed25519 | Shor breaks it — but nothing is signed yet | ⚠️ Latent |
 
@@ -107,16 +115,28 @@ Trace the two paths a vault key can travel:
 Solo vault:    VaultKey ── XChaCha20 under Argon2id(MasterKey) ──▶ server
                Breaking this needs the password. Quantum does not help.   ✅
 
-Shared vault:  VaultKey ── XChaCha20 under HKDF(X25519 ECDH) ──▶ server
-               The server also holds eph_pub_key and the recipient's
+Shared vault,  VaultKey ── XChaCha20 under HKDF(X25519 ECDH) ──▶ server
+before 0.2.0:  The server also holds eph_pub_key and the recipient's
                X25519 public key. Shor recovers the private key from the
                public one, reconstructs the shared secret, unwraps the
                vault key, decrypts every blob.                            ❌
+
+Shared vault,  VaultKey ── XChaCha20 under HKDF(ML-KEM ‖ X25519 ‖ …) ──▶ server
+0.2.0 onward:  Shor still recovers the X25519 half. It contributes 32 of
+               the HKDF's input bytes and the other 32 come from ML-KEM,
+               which Shor does not touch. The wrap key is unrecoverable
+               unless BOTH primitives fall.                               ✅
 ```
 
-So: **every secret ever shared with a teammate is exposed to harvest-now-
-decrypt-later.** The vault contents themselves are AES-256 and fine — it is the
-*wrapping* that fails, and that is enough.
+Before 0.2.0: **every secret ever shared with a teammate was exposed to
+harvest-now-decrypt-later.** The vault contents themselves are AES-256 and fine —
+it was the *wrapping* that failed, and that was enough.
+
+⚠️ **This is why the hybrid landed before `evnx vault share` shipped, not after.**
+A vault key wrapped under X25519 alone stays wrapped that way for as long as the
+row exists; an adversary who recorded it does not care that a later version fixed
+the algorithm. There was no version of this that could be safely retrofitted, so
+sharing was held back until the wrap was right.
 
 SRP is a smaller problem. Shor against the verifier yields `x`, which permits
 impersonation but not password recovery (`x` is downstream of Argon2id). And
@@ -130,30 +150,46 @@ Kyber) side by side and feed both shared secrets into the same HKDF. The result 
 secure if *either* survives — classical security is never reduced, and quantum
 security is gained. This is what TLS deployed as `X25519MLKEM768`.
 
-It fits the existing design almost exactly:
+### What shipped in 0.2.0
 
-```rust
-// today
-let ss = eph_secret.diffie_hellman(&recipient_pub);
-let wrap_key = hkdf_subkey(ss.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
+The combiner takes more than the two secrets:
 
-// hybrid
-let mut ikm = Vec::new();
-ikm.extend_from_slice(ss.as_bytes());          // X25519
-ikm.extend_from_slice(ml_kem_shared.as_ref()); // ML-KEM-768
-let wrap_key = hkdf_subkey(&ikm, HKDF_INFO_VAULT_KEY_WRAP_HYBRID_V2)?;
+```text
+ikm      = ss_mlkem ‖ ss_x25519 ‖ ct_mlkem ‖ eph_pub ‖ recipient_x25519_pub
+wrap_key = HKDF-SHA256(ikm, "evnx-vault-key-wrap-v2")
 ```
 
-`ml-kem` (RustCrypto, FIPS 203) is on crates.io and widely used.
+**Why the transcript is in there.** A shared secret does not bind the message
+that produced it. X25519 is not ciphertext-collision-resistant: distinct
+ephemeral keys can produce the same secret against a chosen static key, so
+without the transcript an attacker able to substitute one half could steer two
+different wraps onto one key. ML-KEM already binds its own ciphertext and public
+key through the FO transform, but including them costs nothing and makes the
+combiner robust by construction rather than by appeal to one primitive's
+internals. This is the shape X-Wing and the TLS hybrid drafts settled on.
 
-It is **not** in 0.1.0 because it changes the wire format — `WrappedVaultKey` grows
-an ML-KEM ciphertext (~1088 bytes) and users grow an ML-KEM public key (~1184
-bytes), which means a server migration and a new column. Shipping it half-done
-would be worse than shipping it deliberately.
+**Why the info string went to v2.** v1 derived the wrap key from the X25519
+secret alone. Reusing it would mean a v1 and a v2 wrap could derive the same key
+from the same ECDH secret — so stripping the ML-KEM ciphertext and presenting the
+blob as v1 would produce a *working* wrap key instead of a failure. The version
+is what makes the hybrid non-optional.
 
-**Recommendation:** target it for **0.2.0, before team sharing ships to real
-users.** Solo vaults — the entire Phase 1 scope — are already post-quantum safe,
-so this does not block publication. It blocks Phase 3.
+**The ML-KEM keypair is derived, not stored.** It comes from the same Ed25519
+seed that already yields the X25519 key, via HKDF under `evnx/mlkem768/v1`. So
+`users.encrypted_private_key` is unchanged — still a sealed 32-byte seed — and no
+existing user is ever asked to re-enter their master password so a second private
+key can be sealed. The cost is that the derivation can never change: a KAT pins
+it, and the test suite documents why.
+
+**What it cost on the wire.** `vault_members` grows a 1088-byte ML-KEM ciphertext
+per member row, `users` grows a 1184-byte ML-KEM public key, and the browser
+bundle grew ~8 KB gzipped. Nothing else changed.
+
+⚠️ **SRP-6a is still Shor-vulnerable** and is deliberately out of scope. Shor
+against the verifier yields `x`, which permits impersonation but not password
+recovery (`x` is downstream of Argon2id), and compromising authentication does
+not decrypt anything — the data key is independent. Fixing the wrapping first was
+the right order.
 
 ---
 
@@ -205,7 +241,9 @@ offering a decryption oracle.
 
 1. **A weak password defeats everything.** Argon2id buys cost, not immunity.
 2. **Variable names are plaintext** (§1).
-3. **Shared vaults are not post-quantum safe** (§3).
+3. ~~**Shared vaults are not post-quantum safe** (§3).~~ **Fixed in 0.2.0** —
+   hybrid X25519 + ML-KEM-768 wrap. SRP-6a remains Shor-vulnerable, which is an
+   authentication problem rather than a confidentiality one; see §3.
 4. **A compromised client is game over** — as with every client-side encryption tool.
 5. **No forward secrecy for stored data.** Wrapped vault keys are long-lived; an
    attacker who obtains a master key can decrypt every past version that key wrapped.

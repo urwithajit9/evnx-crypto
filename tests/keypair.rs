@@ -162,8 +162,8 @@ fn test_wrap_unwrap_vault_key_round_trip() {
     let vault_key = VaultKey::generate();
     let original_key_bytes = vault_key.expose();
 
-    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
-    let unwrapped = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes()).unwrap();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
+    let unwrapped = unwrap_vault_key(&wrapped, &recipient).unwrap();
 
     assert_eq!(
         original_key_bytes,
@@ -179,10 +179,10 @@ fn test_wrap_for_wrong_recipient_fails() {
     let recipient_b = generate_keypair();
 
     let vault_key = VaultKey::generate();
-    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient_a.x25519_public).unwrap();
+    let wrapped = wrap_vault_key_for_user(&vault_key, &recipient_a.public_keys()).unwrap();
 
     // recipient_b tries to unwrap with their key — must fail
-    let result = unwrap_vault_key(&wrapped, recipient_b.x25519_private_bytes());
+    let result = unwrap_vault_key(&wrapped, &recipient_b);
     assert!(result.is_err(), "Wrong private key must fail unwrap");
 }
 
@@ -191,8 +191,8 @@ fn test_wrap_uses_fresh_ephemeral_key_each_call() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
 
-    let wrapped1 = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
-    let wrapped2 = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let wrapped1 = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
+    let wrapped2 = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     // Ephemeral public keys must differ (each wrap generates new ephemeral keypair)
     assert_ne!(
@@ -201,8 +201,8 @@ fn test_wrap_uses_fresh_ephemeral_key_each_call() {
     );
 
     // Both must unwrap to the same vault key
-    let kp1 = unwrap_vault_key(&wrapped1, recipient.x25519_private_bytes()).unwrap();
-    let kp2 = unwrap_vault_key(&wrapped2, recipient.x25519_private_bytes()).unwrap();
+    let kp1 = unwrap_vault_key(&wrapped1, &recipient).unwrap();
+    let kp2 = unwrap_vault_key(&wrapped2, &recipient).unwrap();
     assert_eq!(kp1.expose(), kp2.expose());
 }
 
@@ -210,7 +210,7 @@ fn test_wrap_uses_fresh_ephemeral_key_each_call() {
 fn test_tampered_wrapped_vault_key_fails() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
-    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     // Tamper with ciphertext (skip first 24-byte nonce prefix)
     let ciphertext_start = 24; // XCHACHA_NONCE_LEN
@@ -218,7 +218,7 @@ fn test_tampered_wrapped_vault_key_fails() {
         wrapped.encrypted_vault_key[ciphertext_start + 1] ^= 0xAA;
     }
 
-    let result = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes());
+    let result = unwrap_vault_key(&wrapped, &recipient);
     assert!(result.is_err(), "Tampered ciphertext must fail");
 }
 
@@ -226,12 +226,12 @@ fn test_tampered_wrapped_vault_key_fails() {
 fn test_tampered_ephemeral_pubkey_fails() {
     let recipient = generate_keypair();
     let vault_key = VaultKey::generate();
-    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
+    let mut wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
 
     // Corrupt the ephemeral public key
     wrapped.eph_pub_key[0] ^= 0xFF;
 
-    let result = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes());
+    let result = unwrap_vault_key(&wrapped, &recipient);
     assert!(
         result.is_err(),
         "Wrong ephemeral public key must produce wrong shared secret → decrypt fail"
@@ -266,8 +266,8 @@ fn test_tampered_ephemeral_pubkey_fails() {
 //         let vault_key = VaultKey::from_bytes_for_test(key_bytes);
 //         let original = vault_key.expose();
 
-//         let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
-//         let unwrapped = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes()).unwrap();
+//         let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
+//         let unwrapped = unwrap_vault_key(&wrapped, &recipient).unwrap();
 
 //         prop_assert_eq!(original, unwrapped.expose());
 //     }
@@ -301,8 +301,8 @@ proptest! {
         let vault_key = VaultKey::from_bytes_for_test(key_bytes);
         let original = vault_key.expose();
 
-        let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.x25519_public).unwrap();
-        let unwrapped = unwrap_vault_key(&wrapped, recipient.x25519_private_bytes()).unwrap();
+        let wrapped = wrap_vault_key_for_user(&vault_key, &recipient.public_keys()).unwrap();
+        let unwrapped = unwrap_vault_key(&wrapped, &recipient).unwrap();
 
         prop_assert_eq!(original, unwrapped.expose());
     }

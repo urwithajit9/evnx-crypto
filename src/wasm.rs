@@ -248,8 +248,102 @@ impl KeypairHandle {
         self.inner.x25519_public_base64()
     }
 
+    /// Base64 ML-KEM-768 public key, for `mlkem_public_key` at registration.
+    ///
+    /// 1580 characters. **Send this on registration and on every login** — see
+    /// the backfill note in the crate docs. A user whose account predates F1 has
+    /// no ML-KEM key on file and cannot be shared with until one is uploaded,
+    /// and the key is derivable from the seed they already unseal at login, so
+    /// the upload costs them nothing and never prompts.
+    #[wasm_bindgen(js_name = mlkemPublicKey)]
+    pub fn mlkem_public_key(&self) -> String {
+        self.inner.mlkem_public_base64()
+    }
+
+    /// Unwrap a vault key that was shared with us — hybrid X25519 + ML-KEM.
+    ///
+    /// All three fields come from `GET /api/v1/vaults/{id}/my-key`. Returns an
+    /// opaque handle: the vault key itself never reaches JavaScript.
+    ///
+    /// ⚠️ An error here is the correct outcome for a tampered blob, a wrap meant
+    /// for someone else, or a server that substituted a public key. It is not a
+    /// transient failure and must never be retried into a weaker path.
+    #[wasm_bindgen(js_name = unwrapSharedVaultKey)]
+    pub fn unwrap_shared_vault_key(
+        &self,
+        encrypted_vault_key_b64: &str,
+        eph_pub_key_b64: &str,
+        mlkem_ciphertext_b64: &str,
+    ) -> Result<VaultKeyHandle, JsError> {
+        let wrapped = keypair::WrappedVaultKey::from_base64(
+            encrypted_vault_key_b64,
+            eph_pub_key_b64,
+            mlkem_ciphertext_b64,
+        )
+        .map_err(js)?;
+        let vk = keypair::unwrap_vault_key(&wrapped, &self.inner).map_err(js)?;
+        Ok(VaultKeyHandle { inner: vk })
+    }
+
     /// Drop the private halves now rather than waiting for JS to release this.
     pub fn destroy(self) {}
+}
+
+/// A vault key wrapped for one recipient — the three base64 fields the server
+/// stores in `vault_members`.
+#[wasm_bindgen]
+pub struct WrappedKeyBundle {
+    encrypted_vault_key_b64: String,
+    eph_pub_key_b64: String,
+    mlkem_ciphertext_b64: String,
+}
+
+#[wasm_bindgen]
+impl WrappedKeyBundle {
+    /// The `encrypted_vault_key` field.
+    #[wasm_bindgen(js_name = encryptedVaultKey)]
+    pub fn encrypted_vault_key(&self) -> String {
+        self.encrypted_vault_key_b64.clone()
+    }
+
+    /// The `eph_pub_key` field.
+    #[wasm_bindgen(js_name = ephPubKey)]
+    pub fn eph_pub_key(&self) -> String {
+        self.eph_pub_key_b64.clone()
+    }
+
+    /// The `mlkem_ciphertext` field. 1452 characters.
+    #[wasm_bindgen(js_name = mlkemCiphertext)]
+    pub fn mlkem_ciphertext(&self) -> String {
+        self.mlkem_ciphertext_b64.clone()
+    }
+}
+
+/// Wrap a vault key for another user — **hybrid X25519 + ML-KEM-768**.
+///
+/// Both of the recipient's public keys come from
+/// `GET /api/v1/users/{email}/public-key`, and **both are required**. If that
+/// endpoint returns no `mlkem_public_key`, the recipient cannot be shared with:
+/// show them as "needs to sign in once", never fall back to X25519 alone. There
+/// is no binding here that would let you.
+///
+/// # Errors
+/// Either public key being malformed, or the X25519 key being low-order — which
+/// is a key-substitution attempt by whoever served it, not a typo.
+#[wasm_bindgen(js_name = wrapVaultKeyForUser)]
+pub fn wrap_vault_key_for_user(
+    vk: &VaultKeyHandle,
+    recipient_x25519_b64: &str,
+    recipient_mlkem_b64: &str,
+) -> Result<WrappedKeyBundle, JsError> {
+    let recipient = keypair::UserPublicKeys::from_base64(recipient_x25519_b64, recipient_mlkem_b64)
+        .map_err(js)?;
+    let wrapped = keypair::wrap_vault_key_for_user(&vk.inner, &recipient).map_err(js)?;
+    Ok(WrappedKeyBundle {
+        encrypted_vault_key_b64: wrapped.encrypted_vault_key_base64(),
+        eph_pub_key_b64: wrapped.eph_pub_key_base64(),
+        mlkem_ciphertext_b64: wrapped.mlkem_ciphertext_base64(),
+    })
 }
 
 /// One login's SRP ephemeral. Single-use: a second login needs a fresh one.

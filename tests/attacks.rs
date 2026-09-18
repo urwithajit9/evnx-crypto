@@ -50,10 +50,14 @@ fn rejects_non_contributory_ecdh_key_substitution() {
 
     let forged = WrappedVaultKey {
         eph_pub_key: LOW_ORDER_POINT,
+        // A real encapsulation to the victim, so the ML-KEM half is genuinely
+        // valid. The attack has to be refused on the X25519 half alone — this is
+        // not a test that passes because the forgery was lazy.
+        mlkem_ciphertext: mlkem_encapsulate(&victim.mlkem_public).unwrap().0,
         encrypted_vault_key,
     };
 
-    let result = unwrap_vault_key(&forged, victim.x25519_private_bytes());
+    let result = unwrap_vault_key(&forged, &victim);
 
     assert!(
         result.is_err(),
@@ -183,11 +187,12 @@ fn every_low_order_point_is_rejected_when_unwrapping() {
 
         let forged = WrappedVaultKey {
             eph_pub_key: *point,
+            mlkem_ciphertext: mlkem_encapsulate(&victim.mlkem_public).unwrap().0,
             encrypted_vault_key,
         };
 
         assert!(
-            unwrap_vault_key(&forged, victim.x25519_private_bytes()).is_err(),
+            unwrap_vault_key(&forged, &victim).is_err(),
             "low-order point #{i} was accepted"
         );
     }
@@ -199,8 +204,15 @@ fn low_order_recipient_key_is_rejected_when_wrapping() {
     // public key would wrap the vault key under a secret anyone can compute.
     let vault_key = VaultKey::generate();
 
+    // A real, valid ML-KEM key beside the poisoned X25519 one, so the refusal
+    // has to come from the curve check rather than from a malformed bundle.
+    let honest = generate_keypair();
+
     for (i, point) in LOW_ORDER_POINTS.iter().enumerate() {
-        let recipient = X25519PublicKeyBytes(*point);
+        let recipient = UserPublicKeys {
+            x25519: X25519PublicKeyBytes(*point),
+            mlkem: honest.mlkem_public.clone(),
+        };
         assert!(
             wrap_vault_key_for_user(&vault_key, &recipient).is_err(),
             "wrapped a vault key for low-order recipient #{i}"
@@ -217,17 +229,31 @@ fn ephemeral_public_keys_cannot_be_swapped_between_wraps() {
     let key_a = VaultKey::generate();
     let key_b = VaultKey::generate();
 
-    let wrap_a = wrap_vault_key_for_user(&key_a, &recipient.x25519_public).unwrap();
-    let wrap_b = wrap_vault_key_for_user(&key_b, &recipient.x25519_public).unwrap();
+    let wrap_a = wrap_vault_key_for_user(&key_a, &recipient.public_keys()).unwrap();
+    let wrap_b = wrap_vault_key_for_user(&key_b, &recipient.public_keys()).unwrap();
 
     let spliced = WrappedVaultKey {
         eph_pub_key: wrap_a.eph_pub_key,
+        mlkem_ciphertext: wrap_a.mlkem_ciphertext.clone(),
         encrypted_vault_key: wrap_b.encrypted_vault_key.clone(),
     };
 
     assert!(
-        unwrap_vault_key(&spliced, recipient.x25519_private_bytes()).is_err(),
+        unwrap_vault_key(&spliced, &recipient).is_err(),
         "spliced ephemeral key and ciphertext were accepted"
+    );
+
+    // And the post-quantum half splices no better: A's ephemeral X25519 key with
+    // B's ML-KEM ciphertext derives a wrap key matching neither wrap.
+    let crossed = WrappedVaultKey {
+        eph_pub_key: wrap_a.eph_pub_key,
+        mlkem_ciphertext: wrap_b.mlkem_ciphertext.clone(),
+        encrypted_vault_key: wrap_a.encrypted_vault_key.clone(),
+    };
+
+    assert!(
+        unwrap_vault_key(&crossed, &recipient).is_err(),
+        "a wrap with one half from each of two legitimate wraps was accepted"
     );
 }
 
@@ -254,14 +280,14 @@ fn a_vault_key_wrapped_for_one_user_is_useless_to_another() {
     let mallory = generate_keypair();
     let vault_key = VaultKey::generate();
 
-    let for_alice = wrap_vault_key_for_user(&vault_key, &alice.x25519_public).unwrap();
+    let for_alice = wrap_vault_key_for_user(&vault_key, &alice.public_keys()).unwrap();
 
     assert!(
-        unwrap_vault_key(&for_alice, mallory.x25519_private_bytes()).is_err(),
+        unwrap_vault_key(&for_alice, &mallory).is_err(),
         "a non-recipient unwrapped the vault key"
     );
     // Alice still can.
-    let recovered = unwrap_vault_key(&for_alice, alice.x25519_private_bytes()).unwrap();
+    let recovered = unwrap_vault_key(&for_alice, &alice).unwrap();
     assert_eq!(recovered.expose(), vault_key.expose());
 }
 

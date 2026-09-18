@@ -57,7 +57,7 @@
 //! |--------|---------|
 //! | [`kdf`] | Argon2id derivation of the master key and the SRP password input |
 //! | [`vault`] | AES-256-GCM vault encryption and master-key wrapping |
-//! | [`keypair`] | Ed25519 + X25519 keypairs, private-key encryption, ECDH sharing |
+//! | [`keypair`] | Ed25519 + X25519 + ML-KEM-768 keypairs, private-key encryption, hybrid sharing |
 //! | [`srp`] | SRP-6a client — verifier, ephemeral, proof, server verification |
 //! | [`zeroize`] | Secret-holding types that clear themselves on drop |
 //! | [`encoding`] | base64 / hex wire formats the server validates |
@@ -76,12 +76,13 @@
 //! let aad = vault_aad("8b1f…-vault-id", 7);
 //! let blob = encrypt_vault(b"API_KEY=s3cret\n", &vault_key, &aad)?;
 //!
-//! // Share it: wrap the vault key to the recipient's X25519 public key.
+//! // Share it: wrap the vault key to BOTH of the recipient's public keys.
+//! // The wrap is hybrid — X25519 and ML-KEM-768 — and neither half is optional.
 //! let teammate = generate_keypair();
-//! let wrapped = wrap_vault_key_for_user(&vault_key, &teammate.x25519_public)?;
+//! let wrapped = wrap_vault_key_for_user(&vault_key, &teammate.public_keys())?;
 //!
 //! // The teammate unwraps and decrypts.
-//! let their_key = unwrap_vault_key(&wrapped, teammate.x25519_private_bytes())?;
+//! let their_key = unwrap_vault_key(&wrapped, &teammate)?;
 //! let plaintext = decrypt_vault(&blob, &their_key, &aad)?;
 //! assert_eq!(plaintext, b"API_KEY=s3cret\n");
 //! # Ok(())
@@ -95,7 +96,7 @@
 //! | Password KDF | Argon2id, 64 MB / t=3 / p=4 | OWASP 2024 minimum; memory-hard against GPU attack |
 //! | Vault encryption | AES-256-GCM | Hardware-accelerated; 96-bit random nonce, see [`encrypt_vault`] for the budget |
 //! | Key wrapping | XChaCha20-Poly1305 | 192-bit nonce — random nonces never collide in practice |
-//! | Key agreement | X25519 | Small, fast, misuse-resistant; contributory behaviour checked |
+//! | Key agreement | **X25519 + ML-KEM-768 hybrid** | Neither trusted alone: X25519 falls to Shor, ML-KEM is young. The wrap key is an HKDF over both shared secrets plus the transcript, so it holds if either survives |
 //! | Identity keypair | Ed25519 | Seed is the single encrypted secret; the X25519 key is derived from it. **No signatures are produced yet** — the public key is registered for future use |
 //! | Subkey derivation | HKDF-SHA256 | Domain separation per purpose |
 //! | Authentication | SRP-6a (2048-bit, SHA-256) | The server verifies a password it never learns |
@@ -121,8 +122,8 @@ pub use kdf::{
 pub use keypair::{
     decrypt_private_key, encrypt_private_key, generate_keypair, mlkem_encapsulate,
     unwrap_vault_key, wrap_vault_key_for_user, Ed25519PublicKey, EncryptedPrivateKey,
-    MlKem768PublicKey, UserKeypair, WrappedVaultKey, X25519PublicKeyBytes, MLKEM768_CIPHERTEXT_LEN,
-    MLKEM768_PUBLIC_LEN, MLKEM_SHARED_SECRET_LEN,
+    MlKem768PublicKey, UserKeypair, UserPublicKeys, WrappedVaultKey, X25519PublicKeyBytes,
+    MLKEM768_CIPHERTEXT_LEN, MLKEM768_PUBLIC_LEN, MLKEM_SHARED_SECRET_LEN,
 };
 pub use srp::{
     compute_client_proof, compute_verifier, generate_client_ephemeral, verify_server_proof,

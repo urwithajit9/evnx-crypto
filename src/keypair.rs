@@ -66,9 +66,15 @@ const X25519_PRIVATE_LEN: usize = 32;
 /// X25519 public key length.
 const X25519_PUBLIC_LEN: usize = 32;
 
-/// HKDF info string for vault key wrapping.
-/// Including a version suffix allows future algorithm migration.
-const HKDF_INFO_VAULT_KEY_WRAP: &[u8] = b"evnx-vault-key-wrap-v1";
+/// HKDF info string for the hybrid vault key wrap.
+///
+/// ⚠️ **Bumped v1 → v2 when the wrap became hybrid.** v1 derived the wrap key
+/// from the X25519 shared secret alone. Keeping that string would mean a v1 and
+/// a v2 wrap could derive the same key from the same ECDH secret, so a
+/// downgrade — strip the ML-KEM ciphertext, present it as v1 — would produce a
+/// *working* wrap key rather than a failure. The version is what makes the
+/// hybrid non-optional.
+const HKDF_INFO_VAULT_KEY_WRAP: &[u8] = b"evnx-vault-key-wrap-v2";
 
 /// HKDF info string for private key encryption (different domain from vault wrap).
 const HKDF_INFO_PRIVATE_KEY_ENC: &[u8] = b"evnx-private-key-enc-v1";
@@ -248,8 +254,31 @@ pub struct EncryptedPrivateKey {
 pub struct WrappedVaultKey {
     /// Ephemeral X25519 public key used by the sender during ECDH.
     pub eph_pub_key: [u8; X25519_PUBLIC_LEN],
+
+    /// ML-KEM-768 ciphertext — 1088 bytes — encapsulating the post-quantum half
+    /// of the wrap key to the recipient's ML-KEM public key.
+    ///
+    /// Not optional. A `WrappedVaultKey` without one cannot be unwrapped, which
+    /// is the point: there is no code path that degrades to X25519 alone.
+    pub mlkem_ciphertext: Vec<u8>,
+
     /// VaultKey encrypted with the HKDF-derived wrap key.
     pub encrypted_vault_key: Vec<u8>,
+}
+
+/// Everything a sender needs to wrap a vault key for one recipient.
+///
+/// Both halves are required. Bundling them is not sugar — it is what stops a
+/// caller from supplying a stale ML-KEM key beside a fresh X25519 one, or from
+/// silently skipping the post-quantum half because the parameter happened to be
+/// an `Option`. One value, fetched together from
+/// `GET /api/v1/users/{email}/public-key`, used together.
+#[derive(Clone, Debug)]
+pub struct UserPublicKeys {
+    /// For the classical ECDH half.
+    pub x25519: X25519PublicKeyBytes,
+    /// For the post-quantum KEM half.
+    pub mlkem: MlKem768PublicKey,
 }
 
 // ─── Keypair Generation ────────────────────────────────────────────────────────
@@ -522,42 +551,110 @@ pub fn mlkem_encapsulate(
 
 // ─── ECDH Vault Key Wrapping ───────────────────────────────────────────────────
 
-/// Wrap a `VaultKey` for a specific recipient using X25519 ECDH.
+/// The hybrid combiner: one wrap key from two independent shared secrets.
 ///
-/// The sender generates a fresh ephemeral X25519 keypair for each wrap
-/// operation. The ephemeral private key is zeroized immediately after use.
+/// ```text
+/// ikm       = ss_mlkem ‖ ss_x25519 ‖ mlkem_ct ‖ eph_pub ‖ recipient_x25519_pub
+/// wrap_key  = HKDF-SHA256(ikm, "evnx-vault-key-wrap-v2")
+/// ```
+///
+/// ## Why both secrets, and why the transcript too
+///
+/// **Both secrets** is the entire point of F1: X25519 falls to Shor, and ML-KEM
+/// is a young lattice scheme with far less cryptanalysis behind it than the
+/// curve. Feeding both into one HKDF means the wrap key holds as long as
+/// *either* primitive does. Neither is trusted alone.
+///
+/// **The transcript** — the ML-KEM ciphertext, the ephemeral public key and the
+/// recipient's static public key — is included because a shared secret alone
+/// does not bind the message that produced it. X25519 in particular is not
+/// ciphertext-collision-resistant: distinct ephemeral keys can yield the same
+/// secret against a chosen static key, so without the transcript an attacker who
+/// can substitute one half could steer two different wraps onto one key. ML-KEM
+/// already binds its own ciphertext and public key through the FO transform, but
+/// including them costs nothing and keeps the combiner robust by construction
+/// rather than by appeal to one primitive's internals. This is the shape X-Wing
+/// and the TLS hybrid drafts settled on, for the same reason.
+///
+/// Order is fixed: ML-KEM's secret first. Arbitrary, but it has to be *some*
+/// fixed order and both sides must agree.
+fn hybrid_wrap_key(
+    ss_mlkem: &[u8; MLKEM_SHARED_SECRET_LEN],
+    ss_x25519: &[u8; 32],
+    mlkem_ciphertext: &[u8],
+    eph_pub: &[u8; X25519_PUBLIC_LEN],
+    recipient_x25519_pub: &[u8; X25519_PUBLIC_LEN],
+) -> Result<SecretArray<32>, CryptoError> {
+    let mut ikm = Vec::with_capacity(
+        MLKEM_SHARED_SECRET_LEN + 32 + mlkem_ciphertext.len() + X25519_PUBLIC_LEN * 2,
+    );
+    ikm.extend_from_slice(ss_mlkem);
+    ikm.extend_from_slice(ss_x25519);
+    ikm.extend_from_slice(mlkem_ciphertext);
+    ikm.extend_from_slice(eph_pub);
+    ikm.extend_from_slice(recipient_x25519_pub);
+
+    let key = crate::kdf::hkdf_subkey(&ikm, HKDF_INFO_VAULT_KEY_WRAP);
+
+    // The concatenation held two shared secrets in plaintext. Nothing else wipes
+    // it — `Vec<u8>` has no Drop that does.
+    crate::zeroize::zeroize_slice(&mut ikm);
+    key
+}
+
+/// Wrap a `VaultKey` for a specific recipient — **hybrid X25519 + ML-KEM-768**.
+///
+/// The sender generates a fresh ephemeral X25519 keypair and a fresh ML-KEM
+/// encapsulation for every wrap. Both ephemeral secrets are zeroized after use.
 ///
 /// # Arguments
-/// * `vault_key`      — The vault encryption key to wrap
-/// * `recipient_pub`  — Recipient's X25519 public key (from server)
+/// * `vault_key` — the vault encryption key to wrap
+/// * `recipient` — both of the recipient's public keys, from
+///   `GET /api/v1/users/{email}/public-key`
 ///
 /// # Returns
-/// `WrappedVaultKey` — contains `eph_pub_key` and `encrypted_vault_key`.
-/// Both fields are safe to store on the server.
+/// [`WrappedVaultKey`] — `eph_pub_key`, `mlkem_ciphertext` and
+/// `encrypted_vault_key`. All three are safe to store on the server, and all
+/// three are required to unwrap.
+///
+/// # Errors
+/// [`CryptoError::InvalidPublicKey`] if the recipient's X25519 key is low-order
+/// (see below) or their ML-KEM key is malformed.
 pub fn wrap_vault_key_for_user(
     vault_key: &VaultKey,
-    recipient_pub: &X25519PublicKeyBytes,
+    recipient: &UserPublicKeys,
 ) -> Result<WrappedVaultKey, CryptoError> {
+    // ─── Classical half ──────────────────────────────────────────────────────
     // Generate ephemeral keypair — EphemeralSecret zeroizes on drop
     let eph_secret = EphemeralSecret::random_from_rng(OsRng);
     let eph_pub = X25519PublicKey::from(&eph_secret);
 
-    // ECDH: compute shared secret
-    let recipient_pubkey = X25519PublicKey::from(recipient_pub.0);
+    let recipient_pubkey = X25519PublicKey::from(recipient.x25519.0);
     let shared_secret = eph_secret.diffie_hellman(&recipient_pubkey);
 
     // Reject low-order recipient keys. Curve25519 has eight points of small order;
     // multiplying any of them by our scalar yields the identity, so the shared
     // secret would be all-zero and independent of both private keys. Wrapping a
     // vault key under such a secret would publish it to anyone who noticed.
+    //
+    // Still checked even though ML-KEM now also contributes: a wrap that is
+    // secretly single-primitive is exactly the silent downgrade F1 exists to
+    // prevent, and it must fail loudly rather than lean on the other half.
     if !shared_secret.was_contributory() {
         return Err(CryptoError::InvalidPublicKey);
     }
 
-    // HKDF: derive 32-byte wrap key from shared secret
-    // Domain separation ensures the wrap key is distinct from any
-    // other key derived from the same shared secret.
-    let wrap_key = crate::kdf::hkdf_subkey(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
+    // ─── Post-quantum half ───────────────────────────────────────────────────
+    let (mlkem_ciphertext, ss_mlkem) = mlkem_encapsulate(&recipient.mlkem)?;
+
+    // ─── Combine ─────────────────────────────────────────────────────────────
+    let wrap_key = hybrid_wrap_key(
+        &ss_mlkem,
+        shared_secret.as_bytes(),
+        &mlkem_ciphertext,
+        &eph_pub.to_bytes(),
+        &recipient.x25519.0,
+    )?;
 
     // Encrypt vault_key with wrap_key
     let (cipher, nonce_bytes, nonce) = new_xchacha_cipher(wrap_key.expose(), &[])?;
@@ -572,26 +669,32 @@ pub fn wrap_vault_key_for_user(
 
     Ok(WrappedVaultKey {
         eph_pub_key: eph_pub.to_bytes(),
+        mlkem_ciphertext,
         encrypted_vault_key,
     })
 }
 
-/// Unwrap a `VaultKey` using the recipient's X25519 private key.
+/// Unwrap a vault key that was wrapped for us — **hybrid X25519 + ML-KEM-768**.
 ///
-/// Called client-side when pulling a vault that you're a member of.
+/// Takes the whole [`UserKeypair`] rather than raw private key bytes, because
+/// both halves are needed and because handing out private key material to pass
+/// it back in was never a shape worth keeping.
 ///
-/// # Arguments
-/// * `wrapped`          — The `WrappedVaultKey` from the server
-/// * `my_x25519_private` — Your X25519 private key bytes
+/// # Errors
+/// * [`CryptoError::InvalidPublicKey`] — the ephemeral key is low-order, i.e. a
+///   key-substitution attempt by whoever served this blob.
+/// * [`CryptoError::InvalidInput`] — malformed lengths.
+/// * [`CryptoError::KeyUnwrap`] — the AEAD tag failed. **This is the check that
+///   catches a wrong ML-KEM ciphertext**, because ML-KEM's implicit rejection
+///   reports nothing itself; see [`UserKeypair::mlkem_decapsulate`].
 pub fn unwrap_vault_key(
     wrapped: &WrappedVaultKey,
-    my_x25519_private: &[u8; X25519_PRIVATE_LEN],
+    keypair: &UserKeypair,
 ) -> Result<VaultKey, CryptoError> {
-    // Reconstruct static secret from bytes
-    let my_static = StaticSecret::from(*my_x25519_private);
+    // ─── Classical half ──────────────────────────────────────────────────────
+    let my_static = StaticSecret::from(keypair.x25519_private);
     let eph_pub = X25519PublicKey::from(wrapped.eph_pub_key);
 
-    // ECDH: same shared secret as sender computed
     let shared_secret = my_static.diffie_hellman(&eph_pub);
 
     // The critical check. A malicious server can put a low-order point in
@@ -603,12 +706,21 @@ pub fn unwrap_vault_key(
         return Err(CryptoError::InvalidPublicKey);
     }
 
-    // HKDF: derive the same wrap key
-    let wrap_key = crate::kdf::hkdf_subkey(shared_secret.as_bytes(), HKDF_INFO_VAULT_KEY_WRAP)?;
+    // ─── Post-quantum half ───────────────────────────────────────────────────
+    // Succeeds even on a forged ciphertext — FIPS 203 implicit rejection returns
+    // a pseudo-random secret rather than an error. The AEAD below is what fails.
+    let ss_mlkem = keypair.mlkem_decapsulate(&wrapped.mlkem_ciphertext)?;
 
-    // Decrypt: extract nonce from first 24 bytes if prepended,
-    // OR use a fixed nonce stored in WrappedVaultKey.
-    // DESIGN: nonce is embedded in encrypted_vault_key (first 24 bytes).
+    // ─── Combine ─────────────────────────────────────────────────────────────
+    let wrap_key = hybrid_wrap_key(
+        &ss_mlkem,
+        shared_secret.as_bytes(),
+        &wrapped.mlkem_ciphertext,
+        &wrapped.eph_pub_key,
+        &keypair.x25519_public.0,
+    )?;
+
+    // Decrypt: the nonce is the first 24 bytes of `encrypted_vault_key`.
     if wrapped.encrypted_vault_key.len() < XCHACHA_NONCE_LEN {
         return Err(CryptoError::InvalidInput(
             "wrapped vault key too short".into(),
@@ -761,21 +873,6 @@ impl UserKeypair {
 //     }
 // }
 
-impl UserKeypair {
-    /// Access the X25519 private key bytes for ECDH unwrapping.
-    /// Only expose to the crypto layer — never serialize or transmit.
-    #[allow(dead_code)]
-    pub fn x25519_private_bytes(&self) -> &[u8; X25519_PRIVATE_LEN] {
-        &self.x25519_private
-    }
-
-    /// Access the Ed25519 seed for signing operations.
-    #[allow(dead_code)]
-    pub fn ed25519_seed(&self) -> &[u8; ED25519_PRIVATE_LEN] {
-        &self.ed25519_private_seed
-    }
-}
-
 // ─── Wire Encoding ─────────────────────────────────────────────────────────────
 //
 // Every type below crosses the network as text inside JSON. The server stores
@@ -821,10 +918,64 @@ impl X25519PublicKeyBytes {
     }
 }
 
+impl MlKem768PublicKey {
+    /// Encode as base64 for the `mlkem_public_key` registration field.
+    /// 1184 bytes in, exactly 1580 characters out.
+    pub fn to_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.0)
+    }
+
+    /// Decode a recipient's ML-KEM key from
+    /// `GET /api/v1/users/{email}/public-key`.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if not valid base64 or not 1184 bytes.
+    pub fn from_base64(s: &str) -> Result<Self, CryptoError> {
+        Ok(Self(crate::encoding::b64_decode_array::<
+            MLKEM768_PUBLIC_LEN,
+        >(s, "mlkem_public_key")?))
+    }
+}
+
+impl UserPublicKeys {
+    /// Build from the two base64 fields the public-key endpoint returns.
+    ///
+    /// # Errors
+    /// [`CryptoError::InvalidInput`] if either field is malformed. **A recipient
+    /// with no ML-KEM key on file cannot be shared with** — that is the intended
+    /// outcome, not a gap. Callers should present it as "this user must sign in
+    /// once with an updated client", never wrap under X25519 alone.
+    pub fn from_base64(x25519_b64: &str, mlkem_b64: &str) -> Result<Self, CryptoError> {
+        Ok(Self {
+            x25519: X25519PublicKeyBytes::from_base64(x25519_b64)?,
+            mlkem: MlKem768PublicKey::from_base64(mlkem_b64)?,
+        })
+    }
+}
+
 impl UserKeypair {
+    /// Both of our own public keys, as a sender would need them.
+    ///
+    /// Useful for wrapping to oneself in tests, and for the round-trip check a
+    /// client can run after registering.
+    pub fn public_keys(&self) -> UserPublicKeys {
+        UserPublicKeys {
+            x25519: self.x25519_public.clone(),
+            mlkem: self.mlkem_public.clone(),
+        }
+    }
+
     /// Ed25519 public key as base64 — for the registration payload.
     pub fn ed25519_public_base64(&self) -> String {
         self.ed25519_public.to_base64()
+    }
+
+    /// ML-KEM-768 public key as base64 — for the registration payload.
+    ///
+    /// The server stores this in `users.mlkem_public_key` so other users can
+    /// wrap vault keys for this account with the post-quantum half.
+    pub fn mlkem_public_base64(&self) -> String {
+        self.mlkem_public.to_base64()
     }
 
     /// X25519 public key as base64 — for the registration payload.
@@ -886,21 +1037,43 @@ impl WrappedVaultKey {
         crate::encoding::b64_encode(&self.eph_pub_key)
     }
 
-    /// Rebuild from the two base64 fields the server returns
+    /// The ML-KEM-768 ciphertext as base64 — the `mlkem_ciphertext` API field.
+    /// 1088 bytes in, 1452 characters out.
+    pub fn mlkem_ciphertext_base64(&self) -> String {
+        crate::encoding::b64_encode(&self.mlkem_ciphertext)
+    }
+
+    /// Rebuild from the three base64 fields the server returns
     /// (`GET /api/v1/vaults/{id}/my-key`).
     ///
+    /// ⚠️ **Takes three arguments since 0.2.0.** `mlkem_ciphertext_b64` is not
+    /// optional: a wrap without it cannot be unwrapped, and accepting `None` here
+    /// would only move the failure later while implying a degraded mode exists.
+    ///
     /// # Errors
-    /// [`CryptoError::InvalidInput`] if either string is not valid base64, or if
-    /// `eph_pub_key_b64` does not decode to exactly 32 bytes.
+    /// [`CryptoError::InvalidInput`] if any string is not valid base64, if
+    /// `eph_pub_key_b64` is not exactly 32 bytes, or if `mlkem_ciphertext_b64`
+    /// is not exactly 1088.
     pub fn from_base64(
         encrypted_vault_key_b64: &str,
         eph_pub_key_b64: &str,
+        mlkem_ciphertext_b64: &str,
     ) -> Result<Self, CryptoError> {
+        let mlkem_ciphertext =
+            crate::encoding::b64_decode(mlkem_ciphertext_b64, "mlkem_ciphertext")?;
+        if mlkem_ciphertext.len() != MLKEM768_CIPHERTEXT_LEN {
+            return Err(CryptoError::InvalidInput(format!(
+                "mlkem_ciphertext must be {} bytes, got {}",
+                MLKEM768_CIPHERTEXT_LEN,
+                mlkem_ciphertext.len()
+            )));
+        }
         Ok(Self {
             eph_pub_key: crate::encoding::b64_decode_array::<X25519_PUBLIC_LEN>(
                 eph_pub_key_b64,
                 "eph_pub_key",
             )?,
+            mlkem_ciphertext,
             encrypted_vault_key: crate::encoding::b64_decode(
                 encrypted_vault_key_b64,
                 "encrypted_vault_key",

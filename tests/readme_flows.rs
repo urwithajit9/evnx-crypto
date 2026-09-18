@@ -11,7 +11,7 @@ use evnx_crypto::{
     compute_client_proof, compute_verifier, decrypt_private_key, decrypt_vault, derive_master_key,
     derive_srp_password, encrypt_private_key, encrypt_vault, generate_client_ephemeral,
     generate_keypair, generate_salt, unwrap_vault_key, vault_aad, verify_server_proof,
-    wrap_vault_key_for_user, CryptoError, EncryptedPrivateKey, VaultKey, X25519PublicKeyBytes,
+    wrap_vault_key_for_user, CryptoError, EncryptedPrivateKey, UserPublicKeys, VaultKey,
 };
 
 const PASSWORD: &[u8] = b"correct horse battery staple";
@@ -108,19 +108,19 @@ fn readme_push_and_pull_flow() -> Result<(), CryptoError> {
 
     // A vault key, wrapped to the owner's own public key, as vault creation does.
     let vault_key = VaultKey::generate();
-    let wrapped = wrap_vault_key_for_user(&vault_key, &keypair.x25519_public)?;
+    let wrapped = wrap_vault_key_for_user(&vault_key, &keypair.public_keys())?;
 
     // ── push ──────────────────────────────────────────────────────────────────
     let env_file_bytes = b"DATABASE_URL=postgres://user:pass@localhost/db\nAPI_KEY=s3cret\n";
     let base_version = 6;
 
-    let key_for_push = unwrap_vault_key(&wrapped, keypair.x25519_private_bytes())?;
+    let key_for_push = unwrap_vault_key(&wrapped, &keypair)?;
     let aad = vault_aad(vault_id, base_version + 1);
     let blob = encrypt_vault(env_file_bytes, &key_for_push, &aad)?;
 
     // ── pull ──────────────────────────────────────────────────────────────────
     let version_num = base_version + 1;
-    let key_for_pull = unwrap_vault_key(&wrapped, keypair.x25519_private_bytes())?;
+    let key_for_pull = unwrap_vault_key(&wrapped, &keypair)?;
     let aad = vault_aad(vault_id, version_num);
     let plaintext = decrypt_vault(&blob, &key_for_pull, &aad)?;
 
@@ -139,18 +139,24 @@ fn readme_share_flow() -> Result<(), CryptoError> {
     let vault_id = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
 
     let vault_key = VaultKey::generate();
-    let my_wrapped = wrap_vault_key_for_user(&vault_key, &me.x25519_public)?;
+    let my_wrapped = wrap_vault_key_for_user(&vault_key, &me.public_keys())?;
 
     let blob = encrypt_vault(b"SHARED=yes\n", &vault_key, &vault_aad(vault_id, 1))?;
 
-    // Fetch the collaborator's public key from the server and re-wrap for them.
+    // Fetch the collaborator's public keys from the server and re-wrap for them.
     // The server learns nothing: it only ever sees ciphertext and public keys.
-    let collab_pub = X25519PublicKeyBytes::from_base64(&collaborator.x25519_public_base64())?;
-    let my_vault_key = unwrap_vault_key(&my_wrapped, me.x25519_private_bytes())?;
+    //
+    // BOTH keys, as the wire carries them. A recipient with no ML-KEM key on
+    // file simply cannot be shared with — there is no X25519-only fallback.
+    let collab_pub = UserPublicKeys::from_base64(
+        &collaborator.x25519_public_base64(),
+        &collaborator.mlkem_public_base64(),
+    )?;
+    let my_vault_key = unwrap_vault_key(&my_wrapped, &me)?;
     let wrapped_for_them = wrap_vault_key_for_user(&my_vault_key, &collab_pub)?;
 
     // The collaborator pulls and reads the same plaintext.
-    let their_key = unwrap_vault_key(&wrapped_for_them, collaborator.x25519_private_bytes())?;
+    let their_key = unwrap_vault_key(&wrapped_for_them, &collaborator)?;
     let plaintext = decrypt_vault(&blob, &their_key, &vault_aad(vault_id, 1))?;
 
     assert_eq!(plaintext, b"SHARED=yes\n");
