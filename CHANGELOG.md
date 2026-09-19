@@ -6,6 +6,29 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.2.1] - 2026-09-19
+
+Additive. No API changed, so existing consumers are unaffected.
+
+### Added
+
+- **`reencrypt_vault`** — move one version from an old vault key to a new one,
+  preserving its associated data. The primitive a vault re-key is built from
+  (Phase 3): removing a member previously left the vault key alone, so someone
+  who kept their unwrapped copy could decrypt everything they ever had access to,
+  including versions pushed after removal.
+
+  It exists as a primitive rather than "decrypt, then encrypt" because that form
+  invites three mistakes: using the wrong AAD and silently stripping the blob's
+  replay protection, leaving the decrypted `.env` in a caller-owned buffer that
+  nothing zeroizes, and — on a wrong old key — writing a blob encrypted under the
+  new key from plaintext that was never recovered.
+
+  ⚠️ Rotation prevents *future* reads with the old key. It cannot recall copies
+  of versions the removed member could already read.
+
+---
+
 ## [0.2.0] - 2026-09-18
 
 **Shared vaults are now post-quantum safe.** The vault-key wrap is hybrid
