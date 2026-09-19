@@ -7,8 +7,8 @@ use rand::RngCore;
 use evnx_crypto::errors::CryptoError;
 use evnx_crypto::kdf::MasterKey;
 use evnx_crypto::vault::{
-    blob_hash, decrypt_vault, encrypt_vault, unwrap_vault_key_with_master_key,
-    wrap_vault_key_with_master_key, EncryptedBlob, VaultKey, NONCE_LEN, VAULT_KEY_LEN,
+    blob_hash, decrypt_vault, encrypt_vault, reencrypt_vault, unwrap_vault_key_with_master_key,
+    vault_aad, wrap_vault_key_with_master_key, EncryptedBlob, VaultKey, NONCE_LEN, VAULT_KEY_LEN,
     XCHACHA_NONCE_LEN,
 };
 
@@ -487,4 +487,145 @@ fn test_blob_hash_excludes_the_nonce() {
         blob_hash(&with_nonce),
         "hashing nonce || ciphertext must not accidentally agree"
     );
+}
+
+// ─── Re-keying (Phase 3 step 4) ────────────────────────────────────────────────
+
+/// The core property: after re-encryption the new key opens it and the old one
+/// does not.
+#[test]
+fn reencrypt_moves_a_blob_to_a_new_key() {
+    let old_key = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let aad = vault_aad("3f2504e0-4f89-11d3-9a0c-0305e82c3301", 7);
+    let plaintext = b"DATABASE_URL=postgres://localhost/app\nAPI_KEY=s3cret\n";
+
+    let original = encrypt_vault(plaintext, &old_key, &aad).unwrap();
+    let rekeyed = reencrypt_vault(&original, &old_key, &new_key, &aad).unwrap();
+
+    assert_eq!(
+        decrypt_vault(&rekeyed, &new_key, &aad).unwrap(),
+        plaintext,
+        "the new key must open the re-encrypted blob"
+    );
+    assert!(
+        decrypt_vault(&rekeyed, &old_key, &aad).is_err(),
+        "the OLD key must not open it — otherwise re-keying achieves nothing"
+    );
+}
+
+/// ⚠️ The AAD binds a blob to `(vault_id, version)`. Re-encryption must preserve
+/// it: a re-keyed version 7 that only opens under version 8's AAD would be
+/// unreadable through the normal pull path, and a caller passing `b""` would
+/// silently strip the replay protection the blob had before.
+#[test]
+fn reencrypt_preserves_the_associated_data() {
+    let old_key = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let vault = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+    let aad_v7 = vault_aad(vault, 7);
+
+    let original = encrypt_vault(b"X=1\n", &old_key, &aad_v7).unwrap();
+    let rekeyed = reencrypt_vault(&original, &old_key, &new_key, &aad_v7).unwrap();
+
+    assert!(decrypt_vault(&rekeyed, &new_key, &aad_v7).is_ok());
+
+    // A different version's AAD must not open it.
+    assert!(decrypt_vault(&rekeyed, &new_key, &vault_aad(vault, 8)).is_err());
+    // Nor a different vault's.
+    assert!(decrypt_vault(
+        &rekeyed,
+        &new_key,
+        &vault_aad("00000000-0000-0000-0000-000000000000", 7)
+    )
+    .is_err());
+    // Nor an absent one.
+    assert!(decrypt_vault(&rekeyed, &new_key, b"").is_err());
+}
+
+/// A wrong old key must fail cleanly — the caller has re-keyed nothing, rather
+/// than writing a blob encrypted under a new key from plaintext it never
+/// recovered.
+#[test]
+fn reencrypt_refuses_a_wrong_old_key() {
+    let old_key = VaultKey::generate();
+    let wrong = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let aad = vault_aad("3f2504e0-4f89-11d3-9a0c-0305e82c3301", 1);
+
+    let original = encrypt_vault(b"X=1\n", &old_key, &aad).unwrap();
+    assert!(reencrypt_vault(&original, &wrong, &new_key, &aad).is_err());
+}
+
+/// A mismatched AAD fails too, for the same reason.
+#[test]
+fn reencrypt_refuses_a_mismatched_aad() {
+    let old_key = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let vault = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+    let original = encrypt_vault(b"X=1\n", &old_key, &vault_aad(vault, 1)).unwrap();
+    assert!(reencrypt_vault(&original, &old_key, &new_key, &vault_aad(vault, 2)).is_err());
+}
+
+/// Re-encryption uses a fresh nonce, so two runs over the same input differ.
+/// Reusing the old nonce under a different key would be harmless in AES-GCM
+/// terms, but it is not a habit worth having near this code.
+#[test]
+fn reencrypt_uses_a_fresh_nonce() {
+    let old_key = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let aad = vault_aad("3f2504e0-4f89-11d3-9a0c-0305e82c3301", 1);
+
+    let original = encrypt_vault(b"X=1\n", &old_key, &aad).unwrap();
+    let a = reencrypt_vault(&original, &old_key, &new_key, &aad).unwrap();
+    let b = reencrypt_vault(&original, &old_key, &new_key, &aad).unwrap();
+
+    assert_ne!(a.nonce, original.nonce);
+    assert_ne!(a.nonce, b.nonce);
+    assert_ne!(a.ciphertext, b.ciphertext);
+
+    // Both still open to the same plaintext.
+    assert_eq!(
+        decrypt_vault(&a, &new_key, &aad).unwrap(),
+        decrypt_vault(&b, &new_key, &aad).unwrap()
+    );
+}
+
+/// A whole vault's history re-keyed in one pass — the shape `POST /rekey` drives.
+/// Every version must move, each under its own AAD.
+#[test]
+fn a_whole_history_rekeys_version_by_version() {
+    let old_key = VaultKey::generate();
+    let new_key = VaultKey::generate();
+    let vault = "3f2504e0-4f89-11d3-9a0c-0305e82c3301";
+
+    let history: Vec<(u32, Vec<u8>)> = (1..=12)
+        .map(|v| (v, format!("VERSION={v}\nSECRET=value-{v}\n").into_bytes()))
+        .collect();
+
+    let originals: Vec<_> = history
+        .iter()
+        .map(|(v, pt)| encrypt_vault(pt, &old_key, &vault_aad(vault, *v)).unwrap())
+        .collect();
+
+    let rekeyed: Vec<_> = originals
+        .iter()
+        .zip(&history)
+        .map(|(blob, (v, _))| {
+            reencrypt_vault(blob, &old_key, &new_key, &vault_aad(vault, *v)).unwrap()
+        })
+        .collect();
+
+    for (blob, (v, expected)) in rekeyed.iter().zip(&history) {
+        assert_eq!(
+            &decrypt_vault(blob, &new_key, &vault_aad(vault, *v)).unwrap(),
+            expected,
+            "version {v} did not survive the re-key"
+        );
+        assert!(
+            decrypt_vault(blob, &old_key, &vault_aad(vault, *v)).is_err(),
+            "version {v} is still readable with the old key"
+        );
+    }
 }

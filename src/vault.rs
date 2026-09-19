@@ -214,6 +214,54 @@ pub fn decrypt_vault(
         .map_err(|_| CryptoError::Decryption)
 }
 
+/// Re-encrypt one version under a new vault key, preserving its associated data.
+///
+/// ─── Why this is a primitive rather than "decrypt, then encrypt" ─────────────
+///
+/// Both are true, and the caller could write them out. Three things go wrong
+/// when they do:
+///
+/// 1. **The AAD must be identical on both sides.** [`vault_aad`] binds a blob to
+///    `(vault_id, version)`. Re-encrypting version 7 under a new key must still
+///    produce version 7's AAD — using the *new* version number, or `b""`, would
+///    silently strip the replay protection the blob had before. Taking one `aad`
+///    argument makes that mistake unrepresentable.
+/// 2. **The plaintext must not escape.** Written by hand, the decrypted `.env`
+///    lands in a caller-owned `Vec<u8>` that nothing zeroizes. Here it lives in a
+///    [`SecretBytes`] and is wiped when this function returns, whichever way it
+///    returns.
+/// 3. **A failure must not be ambiguous.** If the old key is wrong the caller
+///    gets [`CryptoError::Decryption`] and has re-keyed nothing, rather than
+///    writing a blob encrypted under a new key from plaintext it never actually
+///    recovered.
+///
+/// ─── What re-keying does and does not achieve ────────────────────────────────
+///
+/// ⚠️ Rotating a vault key makes **future** reads impossible for someone holding
+/// the old key. It does **not** un-share what they already read — they may hold
+/// copies, and no server-side operation can recall those. Callers must say so
+/// rather than implying that a revocation reaches backwards. See
+/// `phase_3/PHASE3-TEAM-RBAC-PLAN.md` §4.
+///
+/// # Errors
+/// [`CryptoError::Decryption`] if `old_key` or `aad` does not match the blob;
+/// [`CryptoError::Encryption`] on a pathological input size.
+pub fn reencrypt_vault(
+    blob: &EncryptedBlob,
+    old_key: &VaultKey,
+    new_key: &VaultKey,
+    aad: &[u8],
+) -> Result<EncryptedBlob, CryptoError> {
+    // Held in a zeroizing wrapper so the plaintext is wiped on every exit path,
+    // including the `?` below.
+    let plaintext = crate::zeroize::SecretBytes::new(decrypt_vault(blob, old_key, aad)?);
+
+    // A fresh nonce, because `encrypt_vault` generates one. Reusing the old
+    // nonce under a different key would be harmless in AES-GCM terms, but
+    // "reuse a nonce" is not a habit worth having anywhere near this code.
+    encrypt_vault(plaintext.as_ref(), new_key, aad)
+}
+
 /// Wrap VaultKey with the user's MasterKey using XChaCha20-Poly1305.
 /// Used for SOLO vaults (owner wraps their own vault key for storage
 /// in vault_members row).
